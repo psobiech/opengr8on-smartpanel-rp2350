@@ -1,0 +1,6 @@
+build/
+build-cmake.log
+test/host/test_panel
+test/host/preview_*.png
+.idea/
+TODO.md

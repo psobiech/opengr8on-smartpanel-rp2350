@@ -1,0 +1,3 @@
+[submodule "external/clu-esp32"]
+	path = external/clu-esp32
+	url = git@github.com:psobiech/opengr8on-clu-esp32.git
