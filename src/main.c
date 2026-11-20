@@ -349,20 +349,27 @@ static uint32_t panel_sn(void)
 // ---------------------------------------------------------------------------------------------
 // Touch: up to 5 fingers (GT911), tracked by the controller's track id. The screen is four
 // quadrants (slot 0..3, the OLED area included); each finger keeps the quadrant it started on,
-// which is pressed while at least one finger holds it. A finger moving SWIPE_PX sideways is a page
-// swipe: its press is cancelled (OnSwitchOff without OnClick) and the finger counts no more.
+// which is pressed while at least one finger holds it. A press is committed only once the finger
+// has stayed within DRAG_PX of its start for PRESS_DELAY_US (or lifted earlier: a tap), with the
+// touch-down time as its start, so a drag never reaches the CLU. A finger moving DRAG_PX is a drag
+// and counts no more; if it was already pressed, the press is cancelled (OnSwitchOff without
+// OnClick). In page control mode a drag of SWIPE_PX sideways also flips the page.
 // A finger is gone after TOUCH_RELEASE_US without it in the reports (debounce), or when reports
 // stop for TOUCH_STALE_US.
 // ---------------------------------------------------------------------------------------------
 #define FINGERS GT911_LCD_TOUCH_MAX_POINTS
+#define DRAG_PX 24
 #define SWIPE_PX 80
+#define PRESS_DELAY_US 80000
 
 typedef struct {
     bool used;
     uint8_t id;
-    int field;          // ui_hit() at touch-down; -2 once it became a swipe
-    int x0, x;          // start / current x (swipe)
+    int field;          // ui_hit() at touch-down; -2 once it became a drag
+    bool pressed;       // press committed to the panel
     bool swiped;
+    int x0, y0;         // start position
+    uint64_t t0;        // touch-down time
     uint64_t up_since;  // 0 = seen in the last report
 } finger_t;
 
@@ -372,9 +379,17 @@ static int fingers_on(int field)
 {
     int n = 0;
     for (int i = 0; i < FINGERS; i++) {
-        n += s_fingers[i].used && s_fingers[i].field == field;
+        n += s_fingers[i].used && s_fingers[i].pressed && s_fingers[i].field == field;
     }
     return n;
+}
+
+static void finger_press(finger_t *f)
+{
+    f->pressed = true;
+    if (fingers_on(f->field) == 1) {
+        LOCKED(panel_touch(&s_panel, f->field, true, f->t0));
+    }
 }
 
 static void touch_poll(bsp_touch_interface_t *touch, uint64_t now)
@@ -401,24 +416,28 @@ static void touch_poll(bsp_touch_interface_t *touch, uint64_t now)
             if (slot < 0) {
                 continue;
             }
-            finger_t *f = &s_fingers[slot];
-            *f = (finger_t){.used = true, .id = td.coords[p].id, .field = ui_hit(x, y), .x0 = x, .x = x};
-            if (f->field >= 0 && fingers_on(f->field) == 1) {
-                LOCKED(panel_touch(&s_panel, f->field, true, now));
-            }
+            s_fingers[slot] = (finger_t){.used = true, .id = td.coords[p].id, .field = ui_hit(x, y),
+                                         .x0 = x, .y0 = y, .t0 = now};
         }
         finger_t *f = &s_fingers[slot];
         seen[slot] = true;
         f->up_since = 0;
-        f->x = x;
-        if (!f->swiped && s_panel.page_control_mode && abs(x - f->x0) > SWIPE_PX) {
-            f->swiped = true; // swipe left = next page
+        int dx = x - f->x0, dy = y - f->y0;
+        if (f->field != -2 && dx * dx + dy * dy > DRAG_PX * DRAG_PX) {
             int field = f->field;
+            bool was_pressed = f->pressed;
             f->field = -2;
-            if (field >= 0 && fingers_on(field) == 0) {
+            f->pressed = false;
+            if (was_pressed && fingers_on(field) == 0) {
                 LOCKED(panel_touch_cancel(&s_panel, field, now));
             }
-            LOCKED(panel_swipe(&s_panel, x < f->x0 ? +1 : -1, now));
+        }
+        if (f->field >= 0 && !f->pressed && now - f->t0 >= PRESS_DELAY_US) {
+            finger_press(f);
+        }
+        if (!f->swiped && s_panel.page_control_mode && abs(dx) > SWIPE_PX) {
+            f->swiped = true; // swipe left = next page
+            LOCKED(panel_swipe(&s_panel, dx < 0 ? +1 : -1, now));
         }
     }
 
@@ -433,9 +452,14 @@ static void touch_poll(bsp_touch_interface_t *touch, uint64_t now)
         if (now - f->up_since < TOUCH_RELEASE_US) {
             continue;
         }
+        if (f->field >= 0 && !f->pressed) {
+            finger_press(f); // tap shorter than PRESS_DELAY_US
+        }
+        bool was_pressed = f->pressed;
         f->used = false;
-        if (f->field >= 0 && fingers_on(f->field) == 0) {
+        if (was_pressed && fingers_on(f->field) == 0) {
             LOCKED(panel_touch(&s_panel, f->field, false, now));
+            s_release_us[f->field] = now; // glow fade even if no frame saw the press (short tap)
         }
     }
 }
