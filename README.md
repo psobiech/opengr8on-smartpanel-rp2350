@@ -91,7 +91,8 @@ Brakuje / nie zostało rozpoznane:
 
 - Etykiety przycisków i stan diod widoczne na ekranie przy każdym przycisku.
 - Multi-touch: każda ćwiartka to osobny przycisk, do 5 palców jednocześnie (śledzone po track id
-  GT911; palec zostaje przy ćwiartce, w której zaczął).
+  GT911; palec zostaje przy ćwiartce, w której zaczął). Przeciągnięcie palca (>24 px) nie jest
+  naciśnięciem: naciśnięcie trafia do CLU dopiero po 80 ms bez ruchu albo przy puszczeniu.
 - Pasek stanu z połączeniem z CLU, adresem RS485 i temperaturą.
 - Numer seryjny i gotowa linia do OM.LUA na ekranie i na USB przy starcie.
 - Diagnostyka na USB: co 5 s statystyki RS485 (`[rs485] rx … errors, frames ok/bad, tx, addr,
