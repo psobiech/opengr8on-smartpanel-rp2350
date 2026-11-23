@@ -25,14 +25,14 @@ typedef struct {
     uint8_t oled[OLED_W * OLED_H / 8];
     uint8_t page, pages;
     uint8_t link;      // 0 no CLU, 1 addressed (no polls), 2 online
-    uint8_t addr;
-    uint32_t sn;
-    int16_t temp_dc;   // 0.1 C
-    bool have_temp;
+    uint8_t address;
+    uint32_t serial_number;
+    int16_t temperature_deci; // 0.1 C
+    bool has_temperature;
 } ui_view_t;
 
-void ui_init(uint16_t *fb);
+void ui_init(uint16_t *framebuffer);
 // Redraw what differs from the previous call (everything on the first call).
-void ui_render(const ui_view_t *v);
+void ui_render(const ui_view_t *view);
 // Touch hit test: quadrant slot 0..3 (anywhere on screen), -2 = outside.
 int ui_hit(int x, int y);

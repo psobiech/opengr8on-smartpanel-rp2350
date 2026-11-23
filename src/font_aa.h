@@ -3,10 +3,10 @@
 #include <stdint.h>
 
 typedef struct {
-    uint8_t w, h;
-    int8_t x, y; // bitmap offset from the pen position (y from the top of the line)
-    uint8_t adv;
-    uint32_t off; // into data, 2 pixels per byte, high nibble first
+    uint8_t width, height;
+    int8_t offset_x, offset_y; // bitmap offset from the pen position (y from the top of the line)
+    uint8_t advance;
+    uint32_t data_offset; // into data, 2 pixels per byte, high nibble first
 } aa_glyph_t;
 
 typedef struct {

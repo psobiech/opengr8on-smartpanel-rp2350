@@ -36,7 +36,7 @@ extern "C" {
 // as soon as their last byte arrives, so a long gap only delays flushing garbage.
 #define PANEL_GAP_US       1500
 #define PANEL_TEMP_PERIOD_US 1250000 // real panel reports temperature every ~1.25 s
-#define PANEL_EVQ          24
+#define PANEL_EVENT_QUEUE_SIZE 24
 
 // Button events (VAL = btn * 7 + event)
 enum {
@@ -51,39 +51,39 @@ typedef enum { LEDS_OFF = 0, LEDS_GREEN, LEDS_RED, LEDS_FLASH_GREEN, LEDS_FLASH_
 typedef enum { OLED_BUTTONS = 0, OLED_FREEDRAW, OLED_TIMEOUT } oled_mode_t;
 
 typedef struct {
-    uint32_t sn;
-    uint8_t addr;                 // 0 = not addressed
+    uint32_t serial_number;
+    uint8_t address;              // 0 = not addressed
     // rx framing
-    uint8_t rx[40];
-    size_t rxlen;
+    uint8_t rx_buffer[40];
+    size_t rx_length;
     uint64_t rx_last_us;
     // stats
     uint32_t polls, frames_rx, frames_bad, frames_unknown, discovered;
     uint64_t last_poll_us;
     // status / events
-    uint8_t evq[PANEL_EVQ];
-    int evq_n;
-    bool evq_overflow;
-    int16_t temp_centi;           // 0.01 C
-    bool have_temp;
-    uint64_t next_temp_us;
+    uint8_t event_queue[PANEL_EVENT_QUEUE_SIZE];
+    int event_queue_length;
+    bool event_queue_overflow;
+    int16_t temperature_centi;    // 0.01 C
+    bool has_temperature;
+    uint64_t next_temperature_us;
     // buttons
     bool slot_down[PANEL_SLOTS];
-    uint8_t slot_btn[PANEL_SLOTS];// button index held by each pressed slot
-    uint64_t slot_t0[PANEL_SLOTS], slot_next_hold[PANEL_SLOTS];
+    uint8_t slot_button[PANEL_SLOTS]; // button index held by each pressed slot
+    uint64_t slot_press_start_us[PANEL_SLOTS], slot_next_hold_us[PANEL_SLOTS];
     uint16_t hold_delay_ms[PANEL_BUTTONS], hold_interval_ms[PANEL_BUTTONS];
     char label[PANEL_BUTTONS][17];
     char icon_a[PANEL_BUTTONS][17];
     // LEDs
     led_state_t led[PANEL_BUTTONS];
-    uint64_t led_flash_until[PANEL_BUTTONS];
+    uint64_t led_flash_until_us[PANEL_BUTTONS];
     led_state_t led_after[PANEL_BUTTONS];
     // panel settings (TFBUS_CMD 0x31 feature commands; see panel_core.c for the mapping)
     uint8_t page;                 // 1..4
     bool buzzer_on;
     uint8_t buttons_led_mode;     // 0 off, 1 location LEDs on, 2 for active
     uint8_t page_control_mode;    // 0 command, 1 gesture/command
-    uint16_t prox_timeout_ms;     // stored only: no proximity sensor, the display stays on
+    uint16_t proximity_timeout_ms; // stored only: no proximity sensor, the display stays on
     // OLED: draw buffer (commands) and shown buffer (after DRAW / DisplayContent), 1 bpp, row-major
     uint8_t oled_draw[OLED_W * OLED_H / 8];
     uint8_t oled_shown[OLED_W * OLED_H / 8];
@@ -93,45 +93,45 @@ typedef struct {
     uint32_t version;             // bumped on any visible change (LED/OLED/page)
     // beep request for the board (consumed by panel_take_beep)
     bool beep;
-    uint16_t beep_freq, beep_ms, beep_vol;
+    uint16_t beep_frequency_hz, beep_duration_ms, beep_volume;
     // board callbacks
-    void (*tx)(const uint8_t *frame, size_t len, void *ctx);
-    void (*log)(const char *msg, void *ctx);
-    void *ctx;
+    void (*transmit)(const uint8_t *frame, size_t frame_length, void *context);
+    void (*log)(const char *message, void *context);
+    void *context;
 } panel_t;
 
-void panel_init(panel_t *p, uint32_t sn);
+void panel_init(panel_t *panel, uint32_t serial_number);
 
 // Feed received RS485 bytes (timestamp of arrival of the chunk).
-void panel_rx(panel_t *p, const uint8_t *data, size_t len, uint64_t now_us);
+void panel_rx(panel_t *panel, const uint8_t *data, size_t data_length, uint64_t now_us);
 // Call periodically (>= every 1 ms): ends frames on line idle, hold events, LED flash, timeouts.
-void panel_tick(panel_t *p, uint64_t now_us);
+void panel_tick(panel_t *panel, uint64_t now_us);
 
 // Physical touch field (0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right).
-void panel_touch(panel_t *p, int slot, bool down, uint64_t now_us);
+void panel_touch(panel_t *panel, int slot, bool down, uint64_t now_us);
 // Release a pressed field without OnClick / OnShortPress / OnLongPress (the touch turned into a
 // swipe): only OnSwitchOff + OnChange, so the CLU's switch state stays consistent.
-void panel_touch_cancel(panel_t *p, int slot, uint64_t now_us);
-// Swipe on the display: dir -1 previous page, +1 next page (local only; wire format of gesture
-// events is not decoded, see README).
-void panel_swipe(panel_t *p, int dir, uint64_t now_us);
+void panel_touch_cancel(panel_t *panel, int slot, uint64_t now_us);
+// Swipe on the display: direction -1 previous page, +1 next page (local only; wire format of
+// gesture events is not decoded, see README).
+void panel_swipe(panel_t *panel, int direction, uint64_t now_us);
 
-void panel_set_temp(panel_t *p, float celsius);
+void panel_set_temp(panel_t *panel, float celsius);
 
 // Button index shown on a slot of the current page.
-int panel_slot_button(const panel_t *p, int slot);
+int panel_slot_button(const panel_t *panel, int slot);
 // Effective LED color for a slot right now (flash phases resolved).
-led_state_t panel_slot_led(const panel_t *p, int slot, uint64_t now_us);
-bool panel_oled_pixel(const panel_t *p, int x, int y);
+led_state_t panel_slot_led(const panel_t *panel, int slot, uint64_t now_us);
+bool panel_oled_pixel(const panel_t *panel, int x, int y);
 
-bool panel_take_beep(panel_t *p, uint16_t *freq, uint16_t *ms, uint16_t *vol);
+bool panel_take_beep(panel_t *panel, uint16_t *frequency_hz, uint16_t *duration_ms, uint16_t *volume);
 
 // UTF-8 (or Latin-1 degree byte) -> ASCII for the panel fonts: Polish letters lose their
 // diacritics, the degree sign becomes 0x7f, anything else '?'. Returns the output length.
 size_t panel_to_ascii(char *dst, size_t cap, const char *src);
 
 // Exposed for tests: draw text into a 1-bpp OLED buffer (font sizes 1..3).
-void panel_oled_text(uint8_t *buf, int x, int y, int size, const char *txt);
+void panel_oled_text(uint8_t *buffer, int x, int y, int size, const char *text);
 
 #ifdef __cplusplus
 }
