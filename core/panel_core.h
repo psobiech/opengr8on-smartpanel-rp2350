@@ -6,6 +6,9 @@
 // Wire behaviour follows a real panel on a real CLU (docs/TFBUS_SMART_PANEL_FM_4.md and
 // "clu firmware/tfbus_capture_20261014_*.log"):
 //   - after RESET: unaddressed; SEEK -> ACK; ADDR_ASSIGN(own SN) -> ACK, take address
+//   - DISCOVER while unaddressed -> SN hwType fwType fwApiVer, after a per-SN/per-attempt slot
+//     delay (a real module answered ~576 ms late) and only on an idle bus; dropped if the master
+//     sends a frame first
 //   - STATUS_POLL -> TLV status, always a data frame:  01 | 06 01 01 00   (+ temp / button event)
 //   - any other unicast frame -> ACK (AA 00 01 AB); VERSION_QUERY -> no reply (like the real panel)
 //   - broadcasts other than SEEK / own ADDR_ASSIGN -> no reply
@@ -60,6 +63,10 @@ typedef struct {
     // stats
     uint32_t polls, frames_rx, frames_bad, frames_unknown, discovered;
     uint64_t last_poll_us;
+    // delayed DISCOVER reply (collision avoidance between unaddressed modules)
+    bool discover_reply_pending;
+    uint64_t discover_reply_due_us;
+    uint32_t discover_requests;   // DISCOVERs seen while unaddressed: varies the reply slot
     // status / events
     uint8_t event_queue[PANEL_EVENT_QUEUE_SIZE];
     int event_queue_length;

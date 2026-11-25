@@ -59,7 +59,7 @@ Działa:
 |---|---|
 | RESET (rozgłoszenie) | porzuca swój adres |
 | SEEK | ACK, jeśli bez adresu |
-| DISCOVER `0x08` (rozgłoszenie) | jeśli bez adresu: `AA 00 08 SN(LE) 03 03 04 XOR` |
+| DISCOVER `0x08` (rozgłoszenie) | jeśli bez adresu: `AA 00 08 SN(LE) 03 03 04 XOR` po 20–770 ms (szczelina z SN i numeru próby), gdy magistrala jest wolna; rezygnuje, gdy CLU wcześniej nada ramkę |
 | ADDR_ASSIGN(własny SN, a) | przyjmuje adres a, ACK |
 | STATUS_POLL | `01 06 01 01 00` (+ `02 02 10 temp` co 1,25 s, + `08 02 10 VAL 00` — jedno zdarzenie przycisku na zapytanie, VAL = przycisk×7 + zdarzenie) |
 | VERSION_QUERY | brak odpowiedzi (jak prawdziwy panel) |
@@ -81,11 +81,19 @@ Brakuje / nie zostało rozpoznane:
 - **Mapowanie ustawień TFBUS_CMD** (`0x02` ProximityTimeout, `0x0c` BuzzerValue, `0x14`
   ButtonsLEDMode, `0x15` PageControlMode) wywnioskowane z kolejności wartości w zrzucie magistrali,
   niepotwierdzone.
-- **Kolizje DISCOVER**: dwa panele bez adresu odpowiadają jednocześnie, CLU widzi zniekształconą
-  odpowiedź i rezygnuje po 3 próbach. Nie wiadomo, jak unikają tego prawdziwe moduły.
+- **Kolizje DISCOVER**: prawdziwe CLU czeka po DISCOVER ok. 1 s i adresuje każdy moduł, który
+  w tym czasie odpowiedział (zrzut: ten panel po 369 ms, RELAY po 577 ms, oba dostały adres).
+  Moduły unikają kolizji tylko różnym opóźnieniem: panel odpowiada w szczelinie 20–770 ms wybranej
+  z SN i numeru próby, po zakończeniu cudzej odpowiedzi. Gdy CLU nada ramkę przed szczeliną
+  (ESP32 CLU wysyła ADDR_ASSIGN zaraz po pierwszej odpowiedzi), panel rezygnuje i zgłasza się na
+  kolejne DISCOVER. Nie wiadomo, czy opóźnienie prawdziwych modułów jest stałe, czy zależy od SN.
 - **Polskie znaki**: fonty mają tylko ASCII i `°`; tekst UTF-8 z CLU jest transliterowany
   („Światło” → „Swiatlo”).
-- **Prawdziwe CLU Grenton**: nie sprawdzono, czy wysyła DISCOVER we właściwym momencie.
+- **Prawdziwe CLU Grenton** wysyła DISCOVER tylko przy wykrywaniu CLU w OM i przy
+  `req_refresh_modules` („Clear CLU”): RESET, ok. 230 ms, DISCOVER, ADDR_ASSIGN dla każdej
+  odpowiedzi, kolejne DISCOVER aż do ciszy. Przy starcie wysyła tylko RESET, SEEK i ADDR_ASSIGN po
+  SN modułów, które już zna, więc nowy panel pojawia się dopiero po wykrywaniu w OM. Sprawdzone:
+  prawdziwe CLU znajduje panel i nadaje mu adres; nie odpytuje go, dopóki nie ma go w OM.LUA.
 
 ## Co ma ponad oryginał
 
@@ -170,7 +178,8 @@ są wypisywane przy starcie na USB i na ekranie.
   PAN0001 = OBJECT:new(29, mm_252047651, 0, "PAN0001")
   PBU0001 = OBJECT:new(30, mm_252047651, 0, "PBU0001")   -- przycisk 1 (kanał 0)
   ```
-- **Wykrywanie** — panel bez adresu odpowiada na rozgłoszenie DISCOVER (`0x08`) swoim SN i typem.
+- **Wykrywanie** — panel bez adresu odpowiada na rozgłoszenie DISCOVER (`0x08`) swoim SN i typem
+  (z opóźnieniem, patrz „Kolizje DISCOVER”).
   ESP32 CLU dopisuje go do `a:\config.txt` (`0f05xxxx:03:03:04`, lista czytana przez OM) i
   `a:\CONFIG.JSON`, więc wykrywanie CLU w OM / „Clear CLU” pokazuje go jako nowy SMART_PANEL_FM_4 i
   zapisuje do OM.LUA.

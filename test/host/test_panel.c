@@ -25,6 +25,7 @@ static void on_tx(const uint8_t *frame, size_t frame_length, void *context);
 static void on_log(const char *message, void *context);
 static void frame(panel_t *panel, uint8_t dest, uint8_t type, const uint8_t *payload, size_t payload_length);
 static void bus(panel_t *panel, const char *hex);
+static void idle_bus(panel_t *panel, uint64_t duration_us);
 static void poll(panel_t *panel, uint8_t address);
 static size_t unhex(uint8_t *out, const char *hex);
 
@@ -46,8 +47,12 @@ int main(int argc, char **argv)
     bus(panel, "aaff2a7f");              // SEEK -> ACK
     check_tx("RESET silent, SEEK ack", "aa0001ab ");
     tx_reset();
-    bus(panel, "aaff085d");              // DISCOVER while unaddressed -> SN hwType fwType fwApiVer
-    check_tx("DISCOVER reply: SN LE, 03 03 04", "aa0008797b050f030304ae ");
+    bus(panel, "aaff085d");              // DISCOVER while unaddressed -> SN hwType fwType fwApiVer, delayed
+    check_tx("DISCOVER: no immediate reply", "");
+    idle_bus(panel, 60000);
+    check_tx("DISCOVER: still waiting 61 ms later", "");
+    idle_bus(panel, 10000);
+    check_tx("DISCOVER reply after this SN's 1st-attempt slot (70 ms): SN LE, 03 03 04", "aa0008797b050f030304ae ");
     {
         const uint8_t *payload;
         size_t payload_length;
@@ -58,6 +63,35 @@ int main(int argc, char **argv)
                                                ident.sn == 0x0f057b79 && ident.hw_type == 3 && ident.fw_type == 3 &&
                                                ident.fw_api_ver == 4);
     }
+    // 2nd DISCOVER (370 ms slot): another module answers at 100 ms -> ours still goes out at 370 ms
+    // (the real CLU addresses every module that answered within its ~1 s window)
+    tx_reset();
+    bus(panel, "aaff085d");
+    idle_bus(panel, 100000);
+    frame(panel, 0x00, 0x08, (const uint8_t[]){0x0b, 0xfb, 0x5e, 0x87, 0x15, 0x02, 0x02}, 7);
+    idle_bus(panel, 260000);
+    check_tx("DISCOVER: another module's reply does not drop ours", "");
+    idle_bus(panel, 10000);
+    check_tx("DISCOVER: reply in its slot after another module's reply", "aa0008797b050f030304ae ");
+    // 3rd DISCOVER (20 ms slot): a frame is arriving when the slot comes -> sent once the bus is idle
+    tx_reset();
+    bus(panel, "aaff085d");
+    idle_bus(panel, 18000);
+    panel_rx(panel, (const uint8_t[]){0xaa, 0x00, 0x08, 0x0b}, 4, now);
+    idle_bus(panel, 1000);
+    check_tx("DISCOVER: no reply while the bus is busy", "");
+    panel_rx(panel, (const uint8_t[]){0xfb, 0x5e, 0x87, 0x15, 0x02, 0x02, 0x9e}, 7, now);
+    idle_bus(panel, 1000);
+    check_tx("DISCOVER: still none within the idle gap", "");
+    idle_bus(panel, 2000);
+    check_tx("DISCOVER: reply once the bus is idle", "aa0008797b050f030304ae ");
+    // 4th DISCOVER (20 ms slot): the master's ADDR_ASSIGN to another module comes first -> dropped
+    tx_reset();
+    bus(panel, "aaff085d");
+    idle_bus(panel, 5000);
+    bus(panel, "aaff02b3a9ab1302f7");
+    idle_bus(panel, 1000000);
+    check_tx("DISCOVER reply dropped: the master sent a frame first", "");
     tx_reset();
     bus(panel, "aaff02b3a9ab1302f7");    // ADDR_ASSIGN other module -> silent
     bus(panel, "aaff02797b050f124d");    // ADDR_ASSIGN 0x0f057b79 -> 0x12, ACK
@@ -398,6 +432,15 @@ static void bus(panel_t *panel, const char *hex)
     panel_rx(panel, bytes, count, now);
     now += 1000;
     panel_tick(panel, now);
+}
+
+// Quiet bus for duration_us, with the main loop ticking every 1 ms
+static void idle_bus(panel_t *panel, uint64_t duration_us)
+{
+    for (uint64_t end_us = now + duration_us; now < end_us;) {
+        now += 1000;
+        panel_tick(panel, now);
+    }
 }
 
 static void poll(panel_t *panel, uint8_t address)

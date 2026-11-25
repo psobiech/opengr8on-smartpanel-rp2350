@@ -10,6 +10,15 @@
 #define LED_FLASH_US       2000000 // ShowOK / ShowError: flash for 2 s ...
 #define LED_FLASH_PHASE_US 250000  // ... with a 500 ms period
 #define DRAW_TIMEOUT_US    1000000 // draw ops without DisplayContent -> "! TIMEOUT !" (window guessed)
+// DISCOVER reply delay: DISCOVER_FIRST_SLOT_US + slot * DISCOVER_SLOT_US, slot 0..DISCOVER_SLOTS-1
+// picked from the SN and the attempt number (20..770 ms). The real CLU keeps a DISCOVER open ~1 s
+// and addresses every module that answered in it (capture: this panel at 369 ms, a RELAY at 577 ms,
+// both assigned), so modules avoid collisions only by answering at different times. Another
+// module's reply only delays ours until the bus is idle; a master frame (an ESP32 CLU sends
+// ADDR_ASSIGN right after the first reply) drops it, and a following DISCOVER is answered instead.
+#define DISCOVER_FIRST_SLOT_US 20000
+#define DISCOVER_SLOT_US       50000
+#define DISCOVER_SLOTS         16
 
 static void render_buttons(panel_t *panel);
 static void rx_process(panel_t *panel, uint64_t now_us, bool idle);
@@ -17,6 +26,8 @@ static int frame_len(const uint8_t *buffer, size_t buffered_length);
 static void resync(panel_t *panel);
 static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_length, uint64_t now_us);
 static void send_status(panel_t *panel, uint64_t now_us);
+static void service_discover_reply(panel_t *panel, uint64_t now_us);
+static uint32_t discover_delay_us(uint32_t serial_number, uint32_t attempt);
 static void apply_led(panel_t *panel, uint16_t mask, uint8_t cmd, uint64_t now_us);
 static void tfbus_cmd(panel_t *panel, const uint8_t *data, uint64_t now_us);
 static void display_block(panel_t *panel, const uint8_t *block);
@@ -86,6 +97,7 @@ void panel_tick(panel_t *panel, uint64_t now_us)
     if (panel->rx_length && (int64_t)(now_us - panel->rx_last_us) > PANEL_GAP_US) {
         rx_process(panel, now_us, true);
     }
+    service_discover_reply(panel, now_us);
     for (int slot = 0; slot < PANEL_SLOTS; slot++) {
         if (!panel->slot_down[slot] || now_us < panel->slot_next_hold_us[slot]) {
             continue;
@@ -198,6 +210,9 @@ static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_leng
 {
     uint8_t dest = frame[1], type = frame[2];
     panel->frames_rx++;
+    if (dest != 0x00) {
+        panel->discover_reply_pending = false; // the master moved on: answer its next DISCOVER
+    }
     if (dest == 0x00) {
         return; // another module's reply (or our own echo)
     }
@@ -220,16 +235,11 @@ static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_leng
                 ack(panel);
             }
             break;
-        case 0x08: // DISCOVER: an unaddressed module reports SN(LE32) hwType fwType fwApiVer
+        case 0x08: // DISCOVER: an unaddressed module reports SN(LE32) hwType fwType fwApiVer, delayed
             if (!panel->address) {
-                uint32_t serial_number = panel->serial_number;
-                uint8_t reply[11] = {0xaa, 0x00, 0x08, (uint8_t)serial_number, (uint8_t)(serial_number >> 8),
-                                     (uint8_t)(serial_number >> 16), (uint8_t)(serial_number >> 24), PANEL_HW_TYPE,
-                                     PANEL_FW_TYPE, PANEL_FW_API_VER, 0};
-                reply[10] = xor8(reply, 10);
-                panel->discovered++;
-                logf_(panel, "DISCOVER: reported SN %08lx", (unsigned long)serial_number);
-                send(panel, reply, sizeof reply);
+                panel->discover_reply_pending = true;
+                panel->discover_reply_due_us =
+                    now_us + discover_delay_us(panel->serial_number, panel->discover_requests++);
             }
             break;
         case 0x02: { // ADDR_ASSIGN sn(LE32) addr
@@ -278,6 +288,38 @@ static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_leng
         break;
     }
     ack(panel);
+}
+
+// Send the pending DISCOVER reply once due and the bus is idle (no frame being received, no bytes
+// within the idle gap): another module's reply in progress only delays it.
+static void service_discover_reply(panel_t *panel, uint64_t now_us)
+{
+    if (!panel->discover_reply_pending || (int64_t)(now_us - panel->discover_reply_due_us) < 0 ||
+        panel->rx_length || (int64_t)(now_us - panel->rx_last_us) <= PANEL_GAP_US) {
+        return;
+    }
+    panel->discover_reply_pending = false;
+    uint32_t serial_number = panel->serial_number;
+    uint8_t reply[11] = {0xaa, 0x00, 0x08, (uint8_t)serial_number, (uint8_t)(serial_number >> 8),
+                         (uint8_t)(serial_number >> 16), (uint8_t)(serial_number >> 24), PANEL_HW_TYPE,
+                         PANEL_FW_TYPE, PANEL_FW_API_VER, 0};
+    reply[10] = xor8(reply, 10);
+    panel->discovered++;
+    logf_(panel, "DISCOVER: reported SN %08lx", (unsigned long)serial_number);
+    send(panel, reply, sizeof reply);
+}
+
+// Reply slot for this SN and attempt (murmur3 finalizer): differs per attempt, so two panels
+// sharing a slot once do not keep colliding.
+static uint32_t discover_delay_us(uint32_t serial_number, uint32_t attempt)
+{
+    uint32_t mixed = serial_number ^ (attempt * 0x9e3779b9u);
+    mixed ^= mixed >> 16;
+    mixed *= 0x85ebca6bu;
+    mixed ^= mixed >> 13;
+    mixed *= 0xc2b2ae35u;
+    mixed ^= mixed >> 16;
+    return DISCOVER_FIRST_SLOT_US + (mixed % DISCOVER_SLOTS) * DISCOVER_SLOT_US;
 }
 
 static void send_status(panel_t *panel, uint64_t now_us)
