@@ -38,7 +38,6 @@ extern "C" {
 // (3 bytes + 32-bit RX timeout). 400 us dropped every frame > 4 bytes; known-length frames complete
 // as soon as their last byte arrives, so a long gap only delays flushing garbage.
 #define PANEL_GAP_US       1500
-#define PANEL_TEMP_PERIOD_US 1250000 // real panel reports temperature every ~1.25 s
 #define PANEL_EVENT_QUEUE_SIZE 24
 
 // Button events (VAL = btn * 7 + event)
@@ -73,7 +72,8 @@ typedef struct {
     bool event_queue_overflow;
     int16_t temperature_centi;    // 0.01 C
     bool has_temperature;
-    uint64_t next_temperature_us;
+    bool sensor_frame_pending;    // send the sensor frame on the next poll without a button event
+    int16_t reported_temperature_deci; // 0.1 C, last value sent in a sensor frame
     // buttons
     bool slot_down[PANEL_SLOTS];
     uint8_t slot_button[PANEL_SLOTS]; // button index held by each pressed slot

@@ -49,10 +49,10 @@ int main(int argc, char **argv)
     tx_reset();
     bus(panel, "aaff085d");              // DISCOVER while unaddressed -> SN hwType fwType fwApiVer, delayed
     check_tx("DISCOVER: no immediate reply", "");
-    idle_bus(panel, 60000);
-    check_tx("DISCOVER: still waiting 61 ms later", "");
+    idle_bus(panel, 435000);
+    check_tx("DISCOVER: still waiting 436 ms later", "");
     idle_bus(panel, 10000);
-    check_tx("DISCOVER reply after this SN's 1st-attempt slot (70 ms): SN LE, 03 03 04", "aa0008797b050f030304ae ");
+    check_tx("DISCOVER reply after this SN's 1st-attempt slot (445 ms): SN LE, 03 03 04", "aa0008797b050f030304ae ");
     {
         const uint8_t *payload;
         size_t payload_length;
@@ -63,20 +63,20 @@ int main(int argc, char **argv)
                                                ident.sn == 0x0f057b79 && ident.hw_type == 3 && ident.fw_type == 3 &&
                                                ident.fw_api_ver == 4);
     }
-    // 2nd DISCOVER (370 ms slot): another module answers at 100 ms -> ours still goes out at 370 ms
+    // 2nd DISCOVER (195 ms slot): another module answers at 100 ms -> ours still goes out at 195 ms
     // (the real CLU addresses every module that answered within its ~1 s window)
     tx_reset();
     bus(panel, "aaff085d");
     idle_bus(panel, 100000);
     frame(panel, 0x00, 0x08, (const uint8_t[]){0x0b, 0xfb, 0x5e, 0x87, 0x15, 0x02, 0x02}, 7);
-    idle_bus(panel, 260000);
+    idle_bus(panel, 85000);
     check_tx("DISCOVER: another module's reply does not drop ours", "");
     idle_bus(panel, 10000);
     check_tx("DISCOVER: reply in its slot after another module's reply", "aa0008797b050f030304ae ");
-    // 3rd DISCOVER (20 ms slot): a frame is arriving when the slot comes -> sent once the bus is idle
+    // 3rd DISCOVER (420 ms slot): a frame is arriving when the slot comes -> sent once the bus is idle
     tx_reset();
     bus(panel, "aaff085d");
-    idle_bus(panel, 18000);
+    idle_bus(panel, 418000);
     panel_rx(panel, (const uint8_t[]){0xaa, 0x00, 0x08, 0x0b}, 4, now);
     idle_bus(panel, 1000);
     check_tx("DISCOVER: no reply while the bus is busy", "");
@@ -85,7 +85,7 @@ int main(int argc, char **argv)
     check_tx("DISCOVER: still none within the idle gap", "");
     idle_bus(panel, 2000);
     check_tx("DISCOVER: reply once the bus is idle", "aa0008797b050f030304ae ");
-    // 4th DISCOVER (20 ms slot): the master's ADDR_ASSIGN to another module comes first -> dropped
+    // 4th DISCOVER (420 ms slot): the master's ADDR_ASSIGN to another module comes first -> dropped
     tx_reset();
     bus(panel, "aaff085d");
     idle_bus(panel, 5000);
@@ -100,6 +100,27 @@ int main(int argc, char **argv)
     tx_reset();
     bus(panel, "aaff085d");              // DISCOVER once addressed: silent
     check_tx("DISCOVER ignored once addressed", "");
+
+    // DISCOVER slots stay clear of a real module's reply (~577 ms) and inside the real CLU's ~1 s window
+    {
+        static panel_t slot_panel = {.transmit = on_tx};
+        panel_init(&slot_panel, 0x0f057b79);
+        int misplaced_replies = 0;
+        for (int attempt = 0; attempt < 64; attempt++) {
+            tx_reset();
+            uint64_t discover_us = now;
+            bus(&slot_panel, "aaff085d");
+            while (s_tx_frames == 0 && now - discover_us < 1000000) {
+                idle_bus(&slot_panel, 1000);
+            }
+            uint64_t reply_delay_ms = (now - discover_us) / 1000;
+            if (s_tx_frames == 0 || (reply_delay_ms > 520 && reply_delay_ms < 625) || reply_delay_ms > 880) {
+                printf("  attempt %d: reply after %llu ms\n", attempt, (unsigned long long)reply_delay_ms);
+                misplaced_replies++;
+            }
+        }
+        check("DISCOVER slots: 20..520 ms or 625..875 ms", misplaced_replies == 0);
+    }
 
     // RX IRQ chunking on the board: FIFO threshold 4 bytes, the tail arrives with the RX timeout
     // ~540 us later. The frame must still be assembled (was dropped as truncated with a 400 us gap).
@@ -135,18 +156,20 @@ int main(int argc, char **argv)
     bus(panel, "aa1304bd");              // poll of another panel: silent
     check_tx("VERSION_QUERY and foreign poll unanswered", "");
 
-    // ---- status: baseline / temperature exactly as the real panel ----
+    // ---- status: sensor frame (temperature in 0.1 C at bytes 7-8) on change, bare ACK otherwise ----
     panel_set_temp(panel, 23.20f);
     tx_reset();
     poll(panel, 0x12);
     poll(panel, 0x12);
-    check_tx("poll: temp frame then baseline (== real capture bytes)",
-             "aa000b02060101000202101009ac aa00060106010100ab ");
+    check_tx("poll after ADDR_ASSIGN: sensor frame 23.2 C, then bare ACK",
+             "aa000e00000000e800000000000000004c aa0001ab ");
     tx_reset();
-    now += PANEL_TEMP_PERIOD_US;
+    panel_set_temp(panel, 23.25f);       // same 0.1 C step as shown on the screen
     poll(panel, 0x12);
-    check("temperature again after 1.25 s",
-          strstr(s_tx_hex, "02021010 09") || strncmp(s_tx_hex, "aa000b02", 8) == 0);
+    panel_set_temp(panel, 23.31f);
+    poll(panel, 0x12);
+    check_tx("temperature: no frame within the same 0.1 C, sensor frame on change",
+             "aa0001ab aa000e00000000e900000000000000004d ");
 
     // ---- real CLU init sequence for this panel: everything ACKed, nothing unknown ----
     static const char *init_frames[] = {
@@ -215,6 +238,8 @@ int main(int argc, char **argv)
     check("press/release btn 2 -> On, Change, Off, Change, Click",
           value_count == 5 && values[0] == 15 && values[1] == 14 && values[2] == 16 && values[3] == 14 &&
               values[4] == 20);
+    check_tx("after the events: sensor frame again (event frames' bytes 7-8 are not a temperature)",
+             "aa000e00000000e900000000000000004d ");
 
     tx_reset();
     panel_touch(panel, 0, true, now);
@@ -258,6 +283,20 @@ int main(int argc, char **argv)
         poll(panel, 0x12);
     }
     panel_swipe(panel, -1, now);
+
+    // ---- SetLabel (real CLU: 0x30 [button, 0x0a, text]): corner label only, OLED untouched ----
+    {
+        uint8_t label_block[22] = {0x00, 0x0a, 'a', 'a', 'a', 'a'};
+        frame(panel, 0x12, 0x30, label_block, sizeof label_block);
+        bool oled_lit = false;
+        for (int y = 0; y < OLED_H; y++) {
+            for (int x = 0; x < OLED_W; x++) {
+                oled_lit |= panel_oled_pixel(panel, x, y);
+            }
+        }
+        check("SetLabel: label stored, nothing drawn on the OLED",
+              strcmp(panel->label[0], "aaaa") == 0 && !oled_lit);
+    }
 
     // ---- LEDs ----
     frame(panel, 0x12, 0x18, (const uint8_t[]){0x08, 0x00, 0x10}, 3);        // RedLedSwitchOn btn 3 (mask 0x08)

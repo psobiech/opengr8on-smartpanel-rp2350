@@ -11,21 +11,26 @@
 #define LED_FLASH_PHASE_US 250000  // ... with a 500 ms period
 #define DRAW_TIMEOUT_US    1000000 // draw ops without DisplayContent -> "! TIMEOUT !" (window guessed)
 // DISCOVER reply delay: DISCOVER_FIRST_SLOT_US + slot * DISCOVER_SLOT_US, slot 0..DISCOVER_SLOTS-1
-// picked from the SN and the attempt number (20..770 ms). The real CLU keeps a DISCOVER open ~1 s
-// and addresses every module that answered in it (capture: this panel at 369 ms, a RELAY at 577 ms,
-// both assigned), so modules avoid collisions only by answering at different times. Another
-// module's reply only delays ours until the bus is idle; a master frame (an ESP32 CLU sends
-// ADDR_ASSIGN right after the first reply) drops it, and a following DISCOVER is answered instead.
+// picked from the SN and the attempt number; delays from DISCOVER_GAP_START_US on are moved past
+// DISCOVER_GAP_US (20..520 ms, 625..875 ms). The real CLU keeps a DISCOVER open ~1 s and addresses
+// every module that answered in it (capture: this panel at 369 ms, a RELAY at 577 ms, both
+// assigned), so modules avoid collisions only by answering at different times: the gap keeps the
+// panel clear of a real module's ~577 ms reply, and a frame takes only ~1 ms, so 25 ms slots are
+// plenty. Another module's reply only delays ours until the bus is idle; a master frame drops it,
+// and a following DISCOVER is answered instead.
 #define DISCOVER_FIRST_SLOT_US 20000
-#define DISCOVER_SLOT_US       50000
-#define DISCOVER_SLOTS         16
+#define DISCOVER_SLOT_US       25000
+#define DISCOVER_SLOTS         32
+#define DISCOVER_GAP_START_US  540000
+#define DISCOVER_GAP_US        80000
 
 static void render_buttons(panel_t *panel);
 static void rx_process(panel_t *panel, uint64_t now_us, bool idle);
 static int frame_len(const uint8_t *buffer, size_t buffered_length);
 static void resync(panel_t *panel);
 static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_length, uint64_t now_us);
-static void send_status(panel_t *panel, uint64_t now_us);
+static void send_status(panel_t *panel);
+static void send_sensor_frame(panel_t *panel, int16_t temperature_deci);
 static void service_discover_reply(panel_t *panel, uint64_t now_us);
 static uint32_t discover_delay_us(uint32_t serial_number, uint32_t attempt);
 static void apply_led(panel_t *panel, uint16_t mask, uint8_t cmd, uint64_t now_us);
@@ -248,7 +253,7 @@ static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_leng
                 panel->address = frame[7];
                 panel->event_queue_length = 0;
                 panel->last_poll_us = 0;
-                panel->next_temperature_us = now_us;
+                panel->sensor_frame_pending = true;
                 logf_(panel, "ADDR_ASSIGN: address %u", panel->address);
                 ack(panel);
             }
@@ -263,7 +268,7 @@ static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_leng
     case 0x04: // STATUS_POLL
         panel->polls++;
         panel->last_poll_us = now_us;
-        send_status(panel, now_us);
+        send_status(panel);
         return;
     case 0xf9: // VERSION_QUERY: the real SMART_PANEL_FM_4 does not answer
         return;
@@ -319,33 +324,52 @@ static uint32_t discover_delay_us(uint32_t serial_number, uint32_t attempt)
     mixed ^= mixed >> 13;
     mixed *= 0xc2b2ae35u;
     mixed ^= mixed >> 16;
-    return DISCOVER_FIRST_SLOT_US + (mixed % DISCOVER_SLOTS) * DISCOVER_SLOT_US;
+    uint32_t delay_us = DISCOVER_FIRST_SLOT_US + (mixed % DISCOVER_SLOTS) * DISCOVER_SLOT_US;
+    return delay_us < DISCOVER_GAP_START_US ? delay_us : delay_us + DISCOVER_GAP_US;
 }
 
-static void send_status(panel_t *panel, uint64_t now_us)
+// STATUS_POLL reply. The real CLU reads the SMART_PANEL temperature only from the fixed 13-byte
+// sensor frame (see send_sensor_frame) and decodes bytes 7-8 of every reply as that temperature:
+// a TLV `02 02 10 temp` record is ignored and the old baseline reply `aa 00 06 01 06 01 01 00 ab`
+// showed 0xab00 -> 4377.6 C in OM. Like the real panels (capture 2026-10-14, addresses 0x12..0x14),
+// the panel therefore answers with a bare ACK when there is nothing to report and sends the sensor
+// frame when the temperature changes. A button event still goes out as a TLV record (real panel
+// capture `08 02 10 VAL 00`, one event per poll); its frame bytes 7-8 are not a temperature, so the
+// sensor frame is sent again on the next poll without an event.
+static void send_status(panel_t *panel)
 {
-    uint8_t frame[32] = {0xaa, 0x00};
-    size_t offset = 4; // frame[2] = len, frame[3] = count
-    uint8_t record_count = 0;
-    frame[offset++] = 0x06; frame[offset++] = 0x01; frame[offset++] = 0x01; frame[offset++] = 0x00; // baseline, always present
-    record_count++;
-    if (panel->has_temperature && now_us >= panel->next_temperature_us) {
-        frame[offset++] = 0x02; frame[offset++] = 0x02; frame[offset++] = 0x10;
-        frame[offset++] = (uint8_t)panel->temperature_centi;
-        frame[offset++] = (uint8_t)((uint16_t)panel->temperature_centi >> 8);
-        record_count++;
-        panel->next_temperature_us = now_us + PANEL_TEMP_PERIOD_US;
-    }
-    int event = pop_event(panel); // one button event per poll, like the real panel
+    int event = pop_event(panel);
     if (event >= 0) {
-        frame[offset++] = 0x08; frame[offset++] = 0x02; frame[offset++] = 0x10;
-        frame[offset++] = (uint8_t)event; frame[offset++] = 0x00;
-        record_count++;
+        uint8_t frame[14] = {0xaa, 0x00, 0x0b, 0x02,
+                             0x06, 0x01, 0x01, 0x00,                       // baseline
+                             0x08, 0x02, 0x10, (uint8_t)event, 0x00};      // button event VAL
+        frame[13] = xor8(frame, 13);
+        send(panel, frame, sizeof frame);
+        panel->sensor_frame_pending = true;
+        return;
     }
-    frame[3] = record_count;
-    frame[2] = (uint8_t)(offset - 3 + 1); // payload length + 1
-    frame[offset] = xor8(frame, offset);
-    send(panel, frame, offset + 1);
+    int16_t temperature_deci = (int16_t)(panel->temperature_centi / 10); // same rounding as the screen
+    if (panel->has_temperature &&
+        (panel->sensor_frame_pending || temperature_deci != panel->reported_temperature_deci)) {
+        send_sensor_frame(panel, temperature_deci);
+        return;
+    }
+    ack(panel);
+}
+
+// Sensor frame of the real SMART_PANEL_FM_4 (non-TLV, record count 0):
+//   aa 00 0e 00 | 00 00 00 | temp_lo temp_hi | s1_lo s1_hi | 00 00 00 00 | s2_lo s2_hi | xor
+// temp: LE int16, 0.1 C (real panels: da 00 = 21.8, e6 00 = 23.0). s1 (0x19..0x106) and
+// s2 (0x176..0x1c2) change independently of the temperature, probably light / proximity; not
+// decoded, sent as 0.
+static void send_sensor_frame(panel_t *panel, int16_t temperature_deci)
+{
+    uint8_t frame[17] = {0xaa, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x00,
+                         (uint8_t)temperature_deci, (uint8_t)((uint16_t)temperature_deci >> 8)};
+    frame[16] = xor8(frame, 16);
+    send(panel, frame, sizeof frame);
+    panel->reported_temperature_deci = temperature_deci;
+    panel->sensor_frame_pending = false;
 }
 
 static void apply_led(panel_t *panel, uint16_t mask, uint8_t cmd, uint64_t now_us)
@@ -423,12 +447,16 @@ static void display_block(panel_t *panel, const uint8_t *block)
     uint8_t channel = block[0], sub = block[1];
     const uint8_t *block_data = block + 2;
     if (channel < PANEL_BUTTONS && (sub == 0x00 || sub == 0x0a)) {
+        // Label (SetLabel, sub 0x0a) is shown only at the button's corner (UI), not on the OLED.
         char *dst = sub == 0x0a ? panel->label[channel] : panel->icon_a[channel];
         char previous[17];
         memcpy(previous, dst, sizeof previous);
         copy_str(dst, 17, block_data, 16);
-        if (strcmp(previous, dst) != 0 && panel->oled_mode == OLED_BUTTONS) {
-            render_buttons(panel);
+        if (strcmp(previous, dst) != 0) {
+            panel->version++;
+            if (sub == 0x00 && panel->oled_mode == OLED_BUTTONS) {
+                render_buttons(panel);
+            }
         }
     }
 }
@@ -616,7 +644,7 @@ static void render_buttons(panel_t *panel)
     for (int slot = 0; slot < PANEL_SLOTS; slot++) {
         int button = panel_slot_button(panel, slot);
         char text[17];
-        snprintf(text, sizeof text, "%s", panel->label[button][0] ? panel->label[button] : panel->icon_a[button]);
+        snprintf(text, sizeof text, "%s", panel->icon_a[button]); // labels go to the corners, not the OLED
         if (!text[0]) {
             continue;
         }

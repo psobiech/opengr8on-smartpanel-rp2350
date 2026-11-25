@@ -59,9 +59,9 @@ Działa:
 |---|---|
 | RESET (rozgłoszenie) | porzuca swój adres |
 | SEEK | ACK, jeśli bez adresu |
-| DISCOVER `0x08` (rozgłoszenie) | jeśli bez adresu: `AA 00 08 SN(LE) 03 03 04 XOR` po 20–770 ms (szczelina z SN i numeru próby), gdy magistrala jest wolna; rezygnuje, gdy CLU wcześniej nada ramkę |
+| DISCOVER `0x08` (rozgłoszenie) | jeśli bez adresu: `AA 00 08 SN(LE) 03 03 04 XOR` po 20–520 albo 625–875 ms (szczelina z SN i numeru próby), gdy magistrala jest wolna; rezygnuje, gdy CLU wcześniej nada ramkę |
 | ADDR_ASSIGN(własny SN, a) | przyjmuje adres a, ACK |
-| STATUS_POLL | `01 06 01 01 00` (+ `02 02 10 temp` co 1,25 s, + `08 02 10 VAL 00` — jedno zdarzenie przycisku na zapytanie, VAL = przycisk×7 + zdarzenie) |
+| STATUS_POLL | zdarzenie przycisku: `02 06 01 01 00 08 02 10 VAL 00` (jedno na zapytanie, VAL = przycisk×7 + zdarzenie); inaczej po zmianie temperatury (o 0,1 °C), po nadaniu adresu i po zdarzeniach: ramka czujników `00 00 00 00 TT TT 00…` (13 B, temperatura LE w 0,1 °C — prawdziwe CLU czyta temperaturę tylko z niej, z bajtów 7–8 każdej odpowiedzi); inaczej samo ACK |
 | VERSION_QUERY | brak odpowiedzi (jak prawdziwy panel) |
 | LED_CMD `0x18 mask_lo mask_hi cmd` | zielona / czerwona / wył., ShowOK / ShowError migają 2 s |
 | TFBUS_CMD `0x31`: `0x0a` PRINT_TEXT, `0x19` DRAW, `0x0f` BEEP | rysowanie do bufora OLED i wyświetlanie, buzzer |
@@ -71,7 +71,8 @@ Brakuje / nie zostało rozpoznane:
 
 - **Wgrywanie konfiguracji stron i przycisków** (podkomendy `0x30` DISPLAY_BLOCK, `0x31 0x12`,
   `0x31 0x1a`, `0x17`). Strony mają domyślny układ (strona p, slot s → przycisk 4(p−1)+s).
-  Założenie: podkomenda `0x0a` w `0x30` to etykieta przycisku, `0x00` to IconA (pokazywana jako
+  Podkomenda `0x0a` w `0x30` to etykieta przycisku (SetLabel; potwierdzone przechwytem) — widoczna
+  tylko w rogu przycisku, nie na OLED-zie. Założenie: `0x00` to IconA (pokazywana na OLED-zie jako
   tekst — brak ikon BMP).
 - **Polecenia rysowania** ClearScreen, DrawLine, DrawPoint, DrawIcon, PrintFloat, ShowButtons —
   format ramek nieznany.
@@ -83,10 +84,10 @@ Brakuje / nie zostało rozpoznane:
   niepotwierdzone.
 - **Kolizje DISCOVER**: prawdziwe CLU czeka po DISCOVER ok. 1 s i adresuje każdy moduł, który
   w tym czasie odpowiedział (zrzut: ten panel po 369 ms, RELAY po 577 ms, oba dostały adres).
-  Moduły unikają kolizji tylko różnym opóźnieniem: panel odpowiada w szczelinie 20–770 ms wybranej
-  z SN i numeru próby, po zakończeniu cudzej odpowiedzi. Gdy CLU nada ramkę przed szczeliną
-  (ESP32 CLU wysyła ADDR_ASSIGN zaraz po pierwszej odpowiedzi), panel rezygnuje i zgłasza się na
-  kolejne DISCOVER. Nie wiadomo, czy opóźnienie prawdziwych modułów jest stałe, czy zależy od SN.
+  Moduły unikają kolizji tylko różnym opóźnieniem: panel odpowiada w jednej z 32 szczelin co 25 ms
+  (20–520 ms albo 625–875 ms, z pominięciem okolic 577 ms, gdzie odpowiada prawdziwy moduł) wybranej
+  z SN i numeru próby, po zakończeniu cudzej odpowiedzi. Gdy CLU nada ramkę przed szczeliną, panel
+  rezygnuje i zgłasza się na kolejne DISCOVER. Nie wiadomo, czy opóźnienie prawdziwych modułów jest stałe, czy zależy od SN.
 - **Polskie znaki**: fonty mają tylko ASCII i `°`; tekst UTF-8 z CLU jest transliterowany
   („Światło” → „Swiatlo”).
 - **Prawdziwe CLU Grenton** wysyła DISCOVER tylko przy wykrywaniu CLU w OM i przy
