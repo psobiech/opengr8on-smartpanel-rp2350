@@ -513,11 +513,12 @@ static void rs485_stats(uint64_t now)
     for (int i = 0; i < 8; i++) {
         last_rx[i] = s_rx_last[(bytes + i) % 8];
     }
-    printf("[rs485] rx %lu bytes (%lu errors), frames ok %lu bad %lu, tx %lu, addr %u, last rx "
-           "%02x %02x %02x %02x %02x %02x %02x %02x\n",
+    printf("[rs485] rx %lu bytes (%lu errors), frames ok %lu bad %lu, polls %lu, tx %lu (queued %u, armed %d), "
+           "addr %u, last rx %02x %02x %02x %02x %02x %02x %02x %02x\n",
            (unsigned long)bytes, (unsigned long)s_rx_errs, (unsigned long)s_panel.frames_rx,
-           (unsigned long)s_panel.frames_bad, (unsigned long)s_tx_frames, s_panel.address, last_rx[0], last_rx[1],
-           last_rx[2], last_rx[3], last_rx[4], last_rx[5], last_rx[6], last_rx[7]);
+           (unsigned long)s_panel.frames_bad, (unsigned long)s_panel.polls, (unsigned long)s_tx_frames,
+           (unsigned)s_tx_queue_length, s_tx_armed, s_panel.address, last_rx[0], last_rx[1], last_rx[2], last_rx[3],
+           last_rx[4], last_rx[5], last_rx[6], last_rx[7]);
 }
 
 // ---------------------------------------------------------------------------------------------

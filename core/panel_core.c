@@ -30,19 +30,21 @@ static int frame_len(const uint8_t *buffer, size_t buffered_length);
 static void resync(panel_t *panel);
 static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_length, uint64_t now_us);
 static void send_status(panel_t *panel);
-static void send_sensor_frame(panel_t *panel, int16_t temperature_deci);
+static void send_state_frame(panel_t *panel, uint16_t changed_buttons, int16_t temperature_deci);
 static void service_discover_reply(panel_t *panel, uint64_t now_us);
 static uint32_t discover_delay_us(uint32_t serial_number, uint32_t attempt);
 static void apply_led(panel_t *panel, uint16_t mask, uint8_t cmd, uint64_t now_us);
+static void set_button_mode(panel_t *panel, uint16_t mask, uint8_t mode);
 static void tfbus_cmd(panel_t *panel, const uint8_t *data, uint64_t now_us);
 static void display_block(panel_t *panel, const uint8_t *block);
 static void copy_str(char *dst, size_t cap, const uint8_t *src, size_t max_length);
 static void ack(panel_t *panel);
 static void send(panel_t *panel, const uint8_t *frame, size_t frame_length);
 static uint8_t xor8(const uint8_t *bytes, size_t count);
-static void push_event(panel_t *panel, int button, int event);
-static bool event_queued(const panel_t *panel, uint8_t value);
-static int pop_event(panel_t *panel);
+static void set_button_value(panel_t *panel, int button, bool value);
+static void push_change(panel_t *panel, int button, bool value);
+static int pop_change(panel_t *panel);
+static bool button_held(const panel_t *panel, int button);
 static void request_beep(panel_t *panel, uint16_t frequency_hz, uint16_t duration_ms, uint16_t volume);
 static int oled_text_width(const char *text, int size);
 static void set_oled_pixel(uint8_t *buffer, int x, int y, bool pixel_on);
@@ -66,10 +68,6 @@ void panel_init(panel_t *panel, uint32_t serial_number)
     panel->buttons_led_mode = 1;
     panel->page_control_mode = 1;
     panel->proximity_timeout_ms = 5000;
-    for (int button = 0; button < PANEL_BUTTONS; button++) {
-        panel->hold_delay_ms[button] = 1000;
-        panel->hold_interval_ms[button] = 100;
-    }
     render_buttons(panel);
 }
 
@@ -103,16 +101,6 @@ void panel_tick(panel_t *panel, uint64_t now_us)
         rx_process(panel, now_us, true);
     }
     service_discover_reply(panel, now_us);
-    for (int slot = 0; slot < PANEL_SLOTS; slot++) {
-        if (!panel->slot_down[slot] || now_us < panel->slot_next_hold_us[slot]) {
-            continue;
-        }
-        int button = panel->slot_button[slot];
-        if (!event_queued(panel, (uint8_t)(button * 7 + PEV_HOLD))) { // polls drain slower than 100 ms holds
-            push_event(panel, button, PEV_HOLD);
-        }
-        panel->slot_next_hold_us[slot] = now_us + (uint64_t)panel->hold_interval_ms[button] * 1000;
-    }
     for (int button = 0; button < PANEL_BUTTONS; button++) {
         if ((panel->led[button] == LEDS_FLASH_GREEN || panel->led[button] == LEDS_FLASH_RED) &&
             now_us >= panel->led_flash_until_us[button]) {
@@ -232,7 +220,7 @@ static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_leng
                 logf_(panel, "RESET: address %u released", panel->address);
             }
             panel->address = 0;
-            panel->event_queue_length = 0;
+            panel->change_queue_length = 0;
             panel->last_poll_us = 0;
             break;
         case 0x2a: // SEEK: unaddressed modules ACK
@@ -251,9 +239,10 @@ static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_leng
             uint32_t assigned_serial = frame[3] | frame[4] << 8 | frame[5] << 16 | (uint32_t)frame[6] << 24;
             if (assigned_serial == panel->serial_number) {
                 panel->address = frame[7];
-                panel->event_queue_length = 0;
+                panel->change_queue_length = 0;
+                panel->reported_button_values = 0; // a newly addressed module starts with all Values 0
                 panel->last_poll_us = 0;
-                panel->sensor_frame_pending = true;
+                panel->state_frame_pending = true;
                 logf_(panel, "ADDR_ASSIGN: address %u", panel->address);
                 ack(panel);
             }
@@ -273,6 +262,7 @@ static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_leng
     case 0xf9: // VERSION_QUERY: the real SMART_PANEL_FM_4 does not answer
         return;
     case 0x07: // unicast RESET
+        logf_(panel, "unicast RESET: address %u released", panel->address);
         panel->address = 0;
         panel->last_poll_us = 0;
         return;
@@ -285,8 +275,11 @@ static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_leng
     case 0x30:
         display_block(panel, frame + 3);
         break;
-    case 0x16: case 0x17: case 0xf0: case 0x13: case 0x14: case 0x15: case 0x1d: case 0x1e:
-        break; // sensor / button / class config: accepted, not used
+    case 0x17: // PANEL_BUTTON class config mask_lo mask_hi mode
+        set_button_mode(panel, (uint16_t)(frame[3] | frame[4] << 8), frame[5]);
+        break;
+    case 0x16: case 0xf0: case 0x13: case 0x14: case 0x15: case 0x1d: case 0x1e:
+        break; // sensor / class config: accepted, not used
     default:
         panel->frames_unknown++;
         logf_(panel, "frame type 0x%02x (%u bytes) not handled", type, (unsigned)frame_length);
@@ -328,48 +321,53 @@ static uint32_t discover_delay_us(uint32_t serial_number, uint32_t attempt)
     return delay_us < DISCOVER_GAP_START_US ? delay_us : delay_us + DISCOVER_GAP_US;
 }
 
-// STATUS_POLL reply. The real CLU reads the SMART_PANEL temperature only from the fixed 13-byte
-// sensor frame (see send_sensor_frame) and decodes bytes 7-8 of every reply as that temperature:
-// a TLV `02 02 10 temp` record is ignored and the old baseline reply `aa 00 06 01 06 01 01 00 ab`
-// showed 0xab00 -> 4377.6 C in OM. Like the real panels (capture 2026-10-14, addresses 0x12..0x14),
-// the panel therefore answers with a bare ACK when there is nothing to report and sends the sensor
-// frame when the temperature changes. A button event still goes out as a TLV record (real panel
-// capture `08 02 10 VAL 00`, one event per poll); its frame bytes 7-8 are not a temperature, so the
-// sensor frame is sent again on the next poll without an event.
+// STATUS_POLL reply. The real CLU (firmware.bin: PANEL_BUTTON state handler 0xb14a2, sensor
+// handler 0xb1526, both given frame + 2) reads every SMART_PANEL reply by position, not as TLV:
+//   aa 00 0e | changed(LE16) | values(LE16) | temp(LE16, 0.1 C) | light(LE16) | 00 00 | ext 00 00 | xor
+// A button's Value is taken from `values` only while its bit in `changed` is set; frame byte 13
+// bits 7..5 select an extended record (gestures, page, proximity), 0 = none. The CLU derives
+// OnSwitchOn / OnSwitchOff / OnChange / OnClick / OnHold ... from Value itself, so the panel sends
+// no button events. Like the real panels (capture 2026-10-14) it answers with a bare ACK when there
+// is nothing to report.
 static void send_status(panel_t *panel)
 {
-    int event = pop_event(panel);
-    if (event >= 0) {
-        uint8_t frame[14] = {0xaa, 0x00, 0x0b, 0x02,
-                             0x06, 0x01, 0x01, 0x00,                       // baseline
-                             0x08, 0x02, 0x10, (uint8_t)event, 0x00};      // button event VAL
-        frame[13] = xor8(frame, 13);
-        send(panel, frame, sizeof frame);
-        panel->sensor_frame_pending = true;
+    int16_t temperature_deci = panel->has_temperature ? (int16_t)(panel->temperature_centi / 10) // same rounding as the screen
+                                                      : panel->reported_temperature_deci;
+    int change = pop_change(panel);
+    if (change < 0 && panel->button_values != panel->reported_button_values) {
+        // a change that did not fit the queue (or happened while not polled): report the current Value
+        uint16_t differing = panel->button_values ^ panel->reported_button_values;
+        int button = __builtin_ctz(differing);
+        change = button << 1 | ((panel->button_values >> button) & 1);
+    }
+    if (change >= 0) {
+        uint16_t button_bit = (uint16_t)(1u << (change >> 1));
+        panel->reported_button_values = (change & 1) ? (uint16_t)(panel->reported_button_values | button_bit)
+                                                     : (uint16_t)(panel->reported_button_values & ~button_bit);
+        send_state_frame(panel, button_bit, temperature_deci);
         return;
     }
-    int16_t temperature_deci = (int16_t)(panel->temperature_centi / 10); // same rounding as the screen
     if (panel->has_temperature &&
-        (panel->sensor_frame_pending || temperature_deci != panel->reported_temperature_deci)) {
-        send_sensor_frame(panel, temperature_deci);
+        (panel->state_frame_pending || temperature_deci != panel->reported_temperature_deci)) {
+        send_state_frame(panel, 0, temperature_deci);
         return;
     }
     ack(panel);
 }
 
-// Sensor frame of the real SMART_PANEL_FM_4 (non-TLV, record count 0):
-//   aa 00 0e 00 | 00 00 00 | temp_lo temp_hi | s1_lo s1_hi | 00 00 00 00 | s2_lo s2_hi | xor
-// temp: LE int16, 0.1 C (real panels: da 00 = 21.8, e6 00 = 23.0). s1 (0x19..0x106) and
-// s2 (0x176..0x1c2) change independently of the temperature, probably light / proximity; not
-// decoded, sent as 0.
-static void send_sensor_frame(panel_t *panel, int16_t temperature_deci)
+// State frame of the real SMART_PANEL_FM_4 (see send_status). Real panels, nothing changed:
+//   aa 00 0e 00 00 00 00 da 00 19 00 00 00 00 9c 01 xx  (21.8 C; the last pair, 0x176..0x1c2, is
+// probably proximity, sent as 0). Light is not measured: sent as 0.
+static void send_state_frame(panel_t *panel, uint16_t changed_buttons, int16_t temperature_deci)
 {
-    uint8_t frame[17] = {0xaa, 0x00, 0x0e, 0x00, 0x00, 0x00, 0x00,
+    uint8_t frame[17] = {0xaa, 0x00, 0x0e,
+                         (uint8_t)changed_buttons, (uint8_t)(changed_buttons >> 8),
+                         (uint8_t)panel->reported_button_values, (uint8_t)(panel->reported_button_values >> 8),
                          (uint8_t)temperature_deci, (uint8_t)((uint16_t)temperature_deci >> 8)};
     frame[16] = xor8(frame, 16);
     send(panel, frame, sizeof frame);
     panel->reported_temperature_deci = temperature_deci;
-    panel->sensor_frame_pending = false;
+    panel->state_frame_pending = false;
 }
 
 static void apply_led(panel_t *panel, uint16_t mask, uint8_t cmd, uint64_t now_us)
@@ -396,6 +394,26 @@ static void apply_led(panel_t *panel, uint16_t mask, uint8_t cmd, uint64_t now_u
         }
     }
     panel->version++;
+}
+
+// PANEL_BUTTON Mode for the buttons in mask. Logged on change, so a real-CLU session shows
+// whether byte 3 really is the Mode set in OM. A button leaving bistable mode drops its state.
+static void set_button_mode(panel_t *panel, uint16_t mask, uint8_t mode)
+{
+    if (mode > BUTTON_MODE_LOCKED) {
+        logf_(panel, "button config 0x17 mask 0x%04x: unknown mode %u, kept", mask, mode);
+        return;
+    }
+    for (int button = 0; button < PANEL_BUTTONS; button++) {
+        if (!(mask & (1u << button)) || panel->button_mode[button] == mode) {
+            continue;
+        }
+        logf_(panel, "button %d mode %u -> %u", button, panel->button_mode[button], mode);
+        panel->button_mode[button] = mode;
+        if (mode == BUTTON_MODE_LOCKED || (mode == BUTTON_MODE_MONOSTABLE && !button_held(panel, button))) {
+            set_button_value(panel, button, false); // a bistable ON does not outlive the mode change
+        }
+    }
 }
 
 static void tfbus_cmd(panel_t *panel, const uint8_t *data, uint64_t now_us)
@@ -497,6 +515,7 @@ static uint8_t xor8(const uint8_t *bytes, size_t count)
 // ---------------------------------------------------------------------------------------------
 void panel_touch(panel_t *panel, int slot, bool down, uint64_t now_us)
 {
+    (void)now_us;
     if (slot < 0 || slot >= PANEL_SLOTS || panel->slot_down[slot] == down) {
         return;
     }
@@ -504,32 +523,24 @@ void panel_touch(panel_t *panel, int slot, bool down, uint64_t now_us)
     if (down) {
         int button = panel_slot_button(panel, slot);
         panel->slot_button[slot] = (uint8_t)button;
-        panel->slot_press_start_us[slot] = now_us;
-        panel->slot_next_hold_us[slot] = now_us + (uint64_t)panel->hold_delay_ms[button] * 1000;
-        push_event(panel, button, PEV_ON);
-        push_event(panel, button, PEV_CHANGE);
         request_beep(panel, 2700, 20, 8);
+        if (panel->button_mode[button] == BUTTON_MODE_BISTABLE) { // each press toggles, release keeps it
+            set_button_value(panel, button, !(panel->button_values & (1u << button)));
+        } else if (panel->button_mode[button] == BUTTON_MODE_MONOSTABLE) {
+            set_button_value(panel, button, true);
+        }
     } else {
         int button = panel->slot_button[slot];
-        uint64_t held_ms = (now_us - panel->slot_press_start_us[slot]) / 1000;
-        push_event(panel, button, PEV_OFF);
-        push_event(panel, button, PEV_CHANGE);
-        push_event(panel, button, held_ms < 500 ? PEV_CLICK : held_ms < 2000 ? PEV_SHORT : PEV_LONG);
+        if (panel->button_mode[button] == BUTTON_MODE_MONOSTABLE && !button_held(panel, button)) {
+            set_button_value(panel, button, false);
+        }
     }
     panel->version++;
 }
 
 void panel_touch_cancel(panel_t *panel, int slot, uint64_t now_us)
 {
-    (void)now_us;
-    if (slot < 0 || slot >= PANEL_SLOTS || !panel->slot_down[slot]) {
-        return;
-    }
-    panel->slot_down[slot] = false;
-    int button = panel->slot_button[slot];
-    push_event(panel, button, PEV_OFF);
-    push_event(panel, button, PEV_CHANGE);
-    panel->version++;
+    panel_touch(panel, slot, false, now_us);
 }
 
 void panel_swipe(panel_t *panel, int direction, uint64_t now_us)
@@ -544,42 +555,54 @@ void panel_swipe(panel_t *panel, int direction, uint64_t now_us)
 }
 
 // ---------------------------------------------------------------------------------------------
-// Events
+// Button Value
 // ---------------------------------------------------------------------------------------------
-static void push_event(panel_t *panel, int button, int event)
+static void set_button_value(panel_t *panel, int button, bool value)
 {
-    if (!panel->address || !panel->last_poll_us) {
-        return; // no CLU polling us (unaddressed, or addressed but not in OM.LUA): nobody to tell
-    }
-    if (panel->event_queue_length >= PANEL_EVENT_QUEUE_SIZE) {
-        if (!panel->event_queue_overflow) {
-            logf_(panel, "event queue full (CLU not polling?), dropping button events");
-        }
-        panel->event_queue_overflow = true;
+    uint16_t button_bit = (uint16_t)(1u << button);
+    if (((panel->button_values & button_bit) != 0) == value) {
         return;
     }
-    panel->event_queue_overflow = false;
-    panel->event_queue[panel->event_queue_length++] = (uint8_t)(button * 7 + event);
+    panel->button_values = value ? (uint16_t)(panel->button_values | button_bit)
+                                 : (uint16_t)(panel->button_values & ~button_bit);
+    push_change(panel, button, value);
 }
 
-static bool event_queued(const panel_t *panel, uint8_t value)
+// True while another pressed field still holds the button (two fingers on one field).
+static bool button_held(const panel_t *panel, int button)
 {
-    for (int i = 0; i < panel->event_queue_length; i++) {
-        if (panel->event_queue[i] == value) {
+    for (int slot = 0; slot < PANEL_SLOTS; slot++) {
+        if (panel->slot_down[slot] && panel->slot_button[slot] == button) {
             return true;
         }
     }
     return false;
 }
 
-static int pop_event(panel_t *panel)
+static void push_change(panel_t *panel, int button, bool value)
 {
-    if (!panel->event_queue_length) {
+    if (!panel->address || !panel->last_poll_us) {
+        return; // no CLU polling us: the current Value goes out once it polls (see send_status)
+    }
+    if (panel->change_queue_length >= PANEL_CHANGE_QUEUE_SIZE) {
+        if (!panel->change_queue_overflow) {
+            logf_(panel, "button change queue full (CLU not polling?), reporting current Values only");
+        }
+        panel->change_queue_overflow = true;
+        return;
+    }
+    panel->change_queue_overflow = false;
+    panel->change_queue[panel->change_queue_length++] = (uint8_t)(button << 1 | value);
+}
+
+static int pop_change(panel_t *panel)
+{
+    if (!panel->change_queue_length) {
         return -1;
     }
-    int value = panel->event_queue[0];
-    memmove(panel->event_queue, panel->event_queue + 1, (size_t)--panel->event_queue_length);
-    return value;
+    int change = panel->change_queue[0];
+    memmove(panel->change_queue, panel->change_queue + 1, (size_t)--panel->change_queue_length);
+    return change;
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -606,6 +629,12 @@ led_state_t panel_slot_led(const panel_t *panel, int slot, uint64_t now_us)
     if (state == LEDS_FLASH_GREEN || state == LEDS_FLASH_RED) {
         bool lit = ((panel->led_flash_until_us[button] - now_us) / LED_FLASH_PHASE_US) % 2 == 0;
         return lit ? (state == LEDS_FLASH_GREEN ? LEDS_GREEN : LEDS_RED) : LEDS_OFF;
+    }
+    // The real CLU sends no LED_CMD when a bistable button toggles (capture 2026-11-25): the panel
+    // shows the ON state itself, unless the CLU set the LED.
+    if (state == LEDS_OFF && panel->button_mode[button] == BUTTON_MODE_BISTABLE &&
+        (panel->button_values & (1u << button))) {
+        return LEDS_GREEN;
     }
     return state;
 }

@@ -219,57 +219,100 @@ int main(int argc, char **argv)
     bus(panel, "aa1204bd");              // bad XOR
     check_tx("bad XOR ignored", "");
 
-    // ---- touch: events drained one per poll, VAL = btn*7 + ev ----
+    // ---- touch: one Value change per poll in the state frame (changed mask, Value mask, temp) ----
+    // state frame: aa 00 0e | changed LE16 | values LE16 | temp 23.3 C (e9 00) | 0 x7 | xor
     tx_reset();
     panel_touch(panel, 2, true, now);    // bottom-left = button 2
     now += 200000;
-    panel_touch(panel, 2, false, now);   // 200 ms -> click
-    int values[8], value_count = 0;
-    for (int i = 0; i < 6; i++) {
-        tx_reset();
-        poll(panel, 0x12);
-        const char *event_record = strstr(s_tx_hex, "080210");
-        if (event_record) {
-            unsigned value;
-            sscanf(event_record + 6, "%2x", &value);
-            values[value_count++] = (int)value;
-        }
+    panel_touch(panel, 2, false, now);   // tap shorter than a poll: still 1 then 0
+    poll(panel, 0x12);
+    poll(panel, 0x12);
+    poll(panel, 0x12);
+    check_tx("tap on button 2: Value 1, Value 0, then bare ACK",
+             "aa000e04000400e900000000000000004d aa000e04000000e9000000000000000049 aa0001ab ");
+    {
+        const uint8_t *payload;
+        size_t payload_length;
+        const uint8_t reply[] = {0xaa, 0x00, 0x0e, 0x04, 0x00, 0x04, 0x00, 0xe9, 0x00,
+                                 0, 0, 0, 0, 0, 0, 0, 0x4d};
+        check("CLU-side framing accepts the state frame", tfbus_parse_response(reply, sizeof reply, &payload, &payload_length));
     }
-    check("press/release btn 2 -> On, Change, Off, Change, Click",
-          value_count == 5 && values[0] == 15 && values[1] == 14 && values[2] == 16 && values[3] == 14 &&
-              values[4] == 20);
-    check_tx("after the events: sensor frame again (event frames' bytes 7-8 are not a temperature)",
-             "aa000e00000000e900000000000000004d ");
 
     tx_reset();
     panel_touch(panel, 0, true, now);
-    now += 1000000;
-    panel_tick(panel, now);              // HoldDelay 1000 ms
-    now += 100000;
-    panel_tick(panel, now);              // HoldInterval: not queued twice
-    int holds = 0;
-    for (int i = 0; i < panel->event_queue_length; i++) {
-        holds += panel->event_queue[i] == 0 * 7 + PEV_HOLD;
-    }
-    check("hold: OnHold after HoldDelay, not duplicated while queued", holds == 1);
-    now += 1500000;
-    panel_touch(panel, 0, false, now);   // 2.6 s -> long press
-    check("long press queued", panel->event_queue[panel->event_queue_length - 1] == PEV_LONG);
-    for (int i = 0; i < 10; i++) {
-        poll(panel, 0x12);
-    }
+    poll(panel, 0x12);
+    now += 2600000;
+    poll(panel, 0x12);                   // still held: Value stays 1, nothing new
+    panel_touch(panel, 0, false, now);
+    poll(panel, 0x12);
+    check_tx("hold button 0: Value 1 while held, 0 on release",
+             "aa000e01000100e900000000000000004d aa0001ab aa000e01000000e900000000000000004c ");
 
-    // ---- press turned into a swipe: Off + Change, no click ----
+    // ---- press turned into a swipe: an ordinary release for the CLU ----
     tx_reset();
     panel_touch(panel, 1, true, now);
     now += 100000;
     panel_touch_cancel(panel, 1, now);
-    check("cancel: On, Change, Off, Change (no click)",
-          panel->event_queue_length == 4 && panel->event_queue[2] == 1 * 7 + PEV_OFF &&
-              panel->event_queue[3] == 1 * 7 + PEV_CHANGE && !panel->slot_down[1]);
-    for (int i = 0; i < 6; i++) {
+    poll(panel, 0x12);
+    poll(panel, 0x12);
+    check_tx("cancel: Value 1 then 0", "aa000e02000200e900000000000000004d aa000e02000000e900000000000000004f ");
+    check("cancel releases the field", !panel->slot_down[1]);
+
+    // ---- button Mode (class 0x17 [mask16, mode]): bistable toggles on press, locked is silent ----
+    tx_reset();
+    frame(panel, 0x12, 0x17, (const uint8_t[]){0x08, 0x00, BUTTON_MODE_BISTABLE}, 3); // button 3
+    check_tx("0x17 button config acked", "aa0001ab ");
+    check("0x17 mask 0x0008 mode 1 -> button 3 bistable, others unchanged",
+          panel->button_mode[3] == BUTTON_MODE_BISTABLE && panel->button_mode[2] == BUTTON_MODE_MONOSTABLE);
+    tx_reset();
+    panel_touch(panel, 3, true, now);
+    panel_touch(panel, 3, false, now);
+    poll(panel, 0x12);
+    poll(panel, 0x12);
+    check_tx("bistable 1st press: Value 1, kept after release", "aa000e08000800e900000000000000004d aa0001ab ");
+    check("bistable ON without LED_CMD: LED green", panel_slot_led(panel, 3, now) == LEDS_GREEN);
+    tx_reset();
+    panel_touch(panel, 3, true, now);
+    panel_touch_cancel(panel, 3, now);
+    poll(panel, 0x12);
+    poll(panel, 0x12);
+    check_tx("bistable 2nd press: Value 0", "aa000e08000000e9000000000000000045 aa0001ab ");
+    check("bistable OFF: LED off", panel_slot_led(panel, 3, now) == LEDS_OFF);
+    tx_reset();
+    panel_touch(panel, 3, true, now);    // on again, then back to monostable: Value dropped
+    panel_touch(panel, 3, false, now);
+    frame(panel, 0x12, 0x17, (const uint8_t[]){0x08, 0x00, BUTTON_MODE_MONOSTABLE}, 3);
+    check("bistable -> monostable drops the toggled Value", !(panel->button_values & 0x0008));
+    tx_reset();
+    poll(panel, 0x12);
+    poll(panel, 0x12);
+    poll(panel, 0x12);
+    check_tx("Value 1 then 0 reported for button 3",
+             "aa000e08000800e900000000000000004d aa000e08000000e9000000000000000045 aa0001ab ");
+    frame(panel, 0x12, 0x17, (const uint8_t[]){0x08, 0x00, BUTTON_MODE_LOCKED}, 3);
+    tx_reset();
+    panel_touch(panel, 3, true, now);
+    panel_touch(panel, 3, false, now);
+    poll(panel, 0x12);
+    check_tx("locked: no Value change", "aa0001ab ");
+    frame(panel, 0x12, 0x17, (const uint8_t[]){0x08, 0x00, BUTTON_MODE_MONOSTABLE}, 3);
+
+    // ---- change queue full: the current Values still go out ----
+    for (int i = 0; i < PANEL_CHANGE_QUEUE_SIZE / 2 + 1; i++) {
+        panel_touch(panel, 2, true, now);
+        panel_touch(panel, 2, false, now);
+    }
+    panel_touch(panel, 2, true, now);    // dropped from the full queue, Value now 1
+    for (int i = 0; i < PANEL_CHANGE_QUEUE_SIZE; i++) {
         poll(panel, 0x12);
     }
+    tx_reset();
+    poll(panel, 0x12);
+    poll(panel, 0x12);
+    check_tx("queue overflow: Value 1 reported from the current state",
+             "aa000e04000400e900000000000000004d aa0001ab ");
+    panel_touch(panel, 2, false, now);
+    poll(panel, 0x12);
 
     // ---- pages: swipe -> page 2, slot 0 = button 4 ----
     panel_swipe(panel, +1, now);
@@ -277,11 +320,9 @@ int main(int argc, char **argv)
     panel_touch(panel, 0, true, now);
     tx_reset();
     poll(panel, 0x12);
-    check("page 2 slot 0 -> VAL 29 (btn 4 OnSwitchOn)", strstr(s_tx_hex, "0802101d00") != NULL);
+    check_tx("page 2 slot 0 -> button 4 Value 1", "aa000e10001000e900000000000000004d ");
     panel_touch(panel, 0, false, now);
-    for (int i = 0; i < 5; i++) {
-        poll(panel, 0x12);
-    }
+    poll(panel, 0x12);
     panel_swipe(panel, -1, now);
 
     // ---- SetLabel (real CLU: 0x30 [button, 0x0a, text]): corner label only, OLED untouched ----

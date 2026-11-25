@@ -9,7 +9,8 @@
 //   - DISCOVER while unaddressed -> SN hwType fwType fwApiVer, after a per-SN/per-attempt slot
 //     delay (a real module answered ~576 ms late) and only on an idle bus; dropped if the master
 //     sends a frame first
-//   - STATUS_POLL -> TLV status, always a data frame:  01 | 06 01 01 00   (+ temp / button event)
+//   - STATUS_POLL -> bare ACK, or the 14-byte state frame (button Value bitmask + temperature) on
+//     a change; the CLU derives OnSwitchOn / OnClick / OnHold ... from the Value bits itself
 //   - any other unicast frame -> ACK (AA 00 01 AB); VERSION_QUERY -> no reply (like the real panel)
 //   - broadcasts other than SEEK / own ADDR_ASSIGN -> no reply
 #pragma once
@@ -38,12 +39,11 @@ extern "C" {
 // (3 bytes + 32-bit RX timeout). 400 us dropped every frame > 4 bytes; known-length frames complete
 // as soon as their last byte arrives, so a long gap only delays flushing garbage.
 #define PANEL_GAP_US       1500
-#define PANEL_EVENT_QUEUE_SIZE 24
+#define PANEL_CHANGE_QUEUE_SIZE 24
 
-// Button events (VAL = btn * 7 + event)
-enum {
-    PEV_CHANGE = 0, PEV_ON = 1, PEV_OFF = 2, PEV_SHORT = 3, PEV_LONG = 4, PEV_HOLD = 5, PEV_CLICK = 6,
-};
+// PANEL_BUTTON feature 1 Mode, from the class frame 0x17 [mask16 LE, mode] (byte 3 = Mode is
+// inferred: every captured button was monostable, i.e. 00)
+enum { BUTTON_MODE_MONOSTABLE = 0, BUTTON_MODE_BISTABLE = 1, BUTTON_MODE_LOCKED = 2 };
 
 // LED_CMD (frame 0x18) commands
 enum { LED_SHOW_OK = 0x00, LED_SHOW_ERROR = 0x01, LED_GREEN = 0x02, LED_OFF = 0x04, LED_RED = 0x10 };
@@ -66,19 +66,21 @@ typedef struct {
     bool discover_reply_pending;
     uint64_t discover_reply_due_us;
     uint32_t discover_requests;   // DISCOVERs seen while unaddressed: varies the reply slot
-    // status / events
-    uint8_t event_queue[PANEL_EVENT_QUEUE_SIZE];
-    int event_queue_length;
-    bool event_queue_overflow;
+    // status: button Value changes not yet reported (button << 1 | value), one per poll, so a
+    // tap shorter than the poll interval still reaches the CLU as 1 then 0
+    uint8_t change_queue[PANEL_CHANGE_QUEUE_SIZE];
+    int change_queue_length;
+    bool change_queue_overflow;
+    uint16_t reported_button_values; // Value bits as last sent to the CLU
     int16_t temperature_centi;    // 0.01 C
     bool has_temperature;
-    bool sensor_frame_pending;    // send the sensor frame on the next poll without a button event
-    int16_t reported_temperature_deci; // 0.1 C, last value sent in a sensor frame
+    bool state_frame_pending;     // send the state frame on the next poll even without a change
+    int16_t reported_temperature_deci; // 0.1 C, last value sent in a state frame
     // buttons
     bool slot_down[PANEL_SLOTS];
     uint8_t slot_button[PANEL_SLOTS]; // button index held by each pressed slot
-    uint64_t slot_press_start_us[PANEL_SLOTS], slot_next_hold_us[PANEL_SLOTS];
-    uint16_t hold_delay_ms[PANEL_BUTTONS], hold_interval_ms[PANEL_BUTTONS];
+    uint8_t button_mode[PANEL_BUTTONS]; // BUTTON_MODE_*
+    uint16_t button_values;       // PANEL_BUTTON Value, bit per button
     char label[PANEL_BUTTONS][17];
     char icon_a[PANEL_BUTTONS][17];
     // LEDs
@@ -116,8 +118,8 @@ void panel_tick(panel_t *panel, uint64_t now_us);
 
 // Physical touch field (0 top-left, 1 top-right, 2 bottom-left, 3 bottom-right).
 void panel_touch(panel_t *panel, int slot, bool down, uint64_t now_us);
-// Release a pressed field without OnClick / OnShortPress / OnLongPress (the touch turned into a
-// swipe): only OnSwitchOff + OnChange, so the CLU's switch state stays consistent.
+// Release a pressed field because the touch turned into a swipe. The CLU derives its events from
+// Value, so for it this is an ordinary release.
 void panel_touch_cancel(panel_t *panel, int slot, uint64_t now_us);
 // Swipe on the display: direction -1 previous page, +1 next page (local only; wire format of
 // gesture events is not decoded, see README).
