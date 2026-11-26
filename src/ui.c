@@ -290,7 +290,7 @@ static void draw_status(const ui_view_t *view)
     } else if (view->link == 1) {
         snprintf(left, sizeof left, "address %u, no polls", view->address);
     } else {
-        snprintf(left, sizeof left, "waiting for CLU  |  SN %08lx", (unsigned long)view->serial_number);
+        snprintf(left, sizeof left, "waiting for CLU  |  SN %lu", (unsigned long)view->serial_number);
     }
     if (view->has_temperature) {
         int temperature = view->temperature_deci;

@@ -478,12 +478,15 @@ static void on_tx(const uint8_t *frame, size_t frame_length, void *context)
     s_tx_hex[s_tx_hex_length++] = ' ';
     s_tx_hex[s_tx_hex_length] = 0;
     s_tx_frames++;
-    // what the CLU sees: its streaming parser + response validation
+    // what the CLU sees: its streaming parser + response validation. Like drv_smart_panel_fm4.c
+    // on_status, a 13-byte payload is the positional state frame, anything else must be TLV.
+    enum { STATE_FRAME_PAYLOAD_LENGTH = 13 };
     const uint8_t *payload;
     size_t payload_length;
     tfbus_ident_t ident;
     if (!tfbus_parse_response(frame, frame_length, &payload, &payload_length) ||
-        (payload_length && tfbus_parse_tlv(payload, payload_length, (tfbus_tlv_t[8]){0}, 8) < 0 &&
+        (payload_length && payload_length != STATE_FRAME_PAYLOAD_LENGTH &&
+         tfbus_parse_tlv(payload, payload_length, (tfbus_tlv_t[8]){0}, 8) < 0 &&
          !(tfbus_parse_discover(payload, payload_length, &ident) && ident.hw_type == PANEL_HW_TYPE))) {
         s_tx_unparsable++;
     }
