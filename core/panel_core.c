@@ -30,7 +30,7 @@ static void rx_process(panel_t *panel, uint64_t now_us, bool idle);
 static int frame_len(const uint8_t *buffer, size_t buffered_length);
 static void resync(panel_t *panel);
 static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_length, uint64_t now_us);
-static void send_status(panel_t *panel);
+static void send_status(panel_t *panel, uint64_t now_us);
 static void send_state_frame(panel_t *panel, uint16_t changed_buttons, int16_t temperature_deci);
 static void service_discover_reply(panel_t *panel, uint64_t now_us);
 static uint32_t discover_delay_us(uint32_t serial_number, uint32_t attempt);
@@ -73,6 +73,7 @@ void panel_init(panel_t *panel, uint32_t serial_number)
     panel->page_control_mode = 1;
     panel->proximity_timeout_ms = 5000;
     panel->gesture_display_mode = 1;
+    panel->temperature_period_ms = 1000; // PANELSENSTEMP Sensitivity default
     render_buttons(panel);
 }
 
@@ -265,7 +266,7 @@ static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_leng
     case 0x04: // STATUS_POLL
         panel->polls++;
         panel->last_poll_us = now_us;
-        send_status(panel);
+        send_status(panel, now_us);
         return;
     case 0xf9: // VERSION_QUERY: the real SMART_PANEL_FM_4 does not answer
         return;
@@ -286,7 +287,16 @@ static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_leng
     case 0x17: // PANEL_BUTTON class config mask_lo mask_hi mode
         set_button_mode(panel, (uint16_t)(frame[3] | frame[4] << 8), frame[5]);
         break;
-    case 0x16: case 0xf0: case 0x13: case 0x14: case 0x15: case 0x1d: case 0x1e:
+    // 0x16 sensor config [sensor 00 temp / 01 light, Sensitivity / 100 ms, Threshold x 10 LE16] (checked
+    // on a real CLU). A real panel samples once per Sensitivity and reports the sample (bench: light with
+    // 5000 ms -> a report every ~5.4 s, short flashes between samples lost); Threshold does not limit
+    // its reports (light 1.9 -> 2.1 % reported with Threshold 0.5). Light is not measured here.
+    case 0x16:
+        if (frame[3] == 0x00) {
+            panel->temperature_period_ms = (uint16_t)(frame[4] * 100u);
+        }
+        break;
+    case 0xf0: case 0x13: case 0x14: case 0x15: case 0x1d: case 0x1e:
         break; // sensor / class config: accepted, not used
     default:
         panel->frames_unknown++;
@@ -340,7 +350,7 @@ static uint32_t discover_delay_us(uint32_t serial_number, uint32_t attempt)
 // OnSwitchOn / OnSwitchOff / OnChange / OnClick / OnHold ... from Value itself, so the panel sends
 // no button events. Like the real panels (capture 2026-10-14) it answers with a bare ACK when there
 // is nothing to report.
-static void send_status(panel_t *panel)
+static void send_status(panel_t *panel, uint64_t now_us)
 {
     int16_t temperature_deci = panel->has_temperature ? (int16_t)(panel->temperature_centi / 10) // same rounding as the screen
                                                       : panel->reported_temperature_deci;
@@ -362,9 +372,13 @@ static void send_status(panel_t *panel)
         send_state_frame(panel, 0, temperature_deci);
         return;
     }
+    // temperature alone: at most once per Sensitivity (temperature_period_ms)
     if (panel->has_temperature &&
-        (panel->state_frame_pending || temperature_deci != panel->reported_temperature_deci)) {
+        (panel->state_frame_pending ||
+         (temperature_deci != panel->reported_temperature_deci &&
+          now_us - panel->last_temperature_report_us >= (uint64_t)panel->temperature_period_ms * 1000))) {
         send_state_frame(panel, 0, temperature_deci);
+        panel->last_temperature_report_us = now_us;
         return;
     }
     ack(panel);

@@ -79,6 +79,8 @@ typedef struct {
     bool has_temperature;
     bool state_frame_pending;     // send the state frame on the next poll even without a change
     int16_t reported_temperature_deci; // 0.1 C, last value sent in a state frame
+    uint16_t temperature_period_ms; // PANELSENSTEMP Sensitivity (frame 0x16): one temperature report per period
+    uint64_t last_temperature_report_us; // a temperature-only state frame went out
     uint8_t pending_ext_flags;    // gesture flags for the next state frame's ext byte, sent once
     // buttons
     bool slot_down[PANEL_SLOTS];

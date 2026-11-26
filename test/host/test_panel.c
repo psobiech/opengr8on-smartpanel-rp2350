@@ -168,8 +168,28 @@ int main(int argc, char **argv)
     poll(panel, 0x12);
     panel_set_temp(panel, 23.31f);
     poll(panel, 0x12);
-    check_tx("temperature: no frame within the same 0.1 C, sensor frame on change",
-             "aa0001ab aa000e00000000e900000000000000004d ");
+    check_tx("temperature: no frame within the same 0.1 C, nor before Sensitivity (1000 ms) has passed",
+             "aa0001ab aa0001ab ");
+    now += 1000000;
+    tx_reset();
+    poll(panel, 0x12);
+    check_tx("temperature: sensor frame once the period has passed", "aa000e00000000e900000000000000004d ");
+
+    // ---- Sensitivity from the CLU (class frame 0x16 [sensor 00, ms / 100, Threshold x 10 LE16]): 5000 ms ----
+    frame(panel, 0x12, 0x16, (const uint8_t[]){0x00, 0x32, 0x01, 0x00}, 4);
+    panel_set_temp(panel, 23.20f);
+    now += 3900000;
+    tx_reset();
+    poll(panel, 0x12);
+    check_tx("Sensitivity 5000 ms: no temperature report after 4 s", "aa0001ab ");
+    now += 1100000;
+    tx_reset();
+    poll(panel, 0x12);
+    check_tx("Sensitivity 5000 ms: reported after 5 s", "aa000e00000000e800000000000000004c ");
+    frame(panel, 0x12, 0x16, (const uint8_t[]){0x00, 0x0a, 0x01, 0x00}, 4); // back to 1000 ms
+    panel_set_temp(panel, 23.31f);
+    now += 5000000;
+    poll(panel, 0x12); // 23.3 C reported again for the tests below
 
     // ---- real CLU init sequence for this panel: everything ACKed, nothing unknown ----
     static const char *init_frames[] = {

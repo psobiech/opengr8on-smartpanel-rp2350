@@ -62,7 +62,7 @@ Działa:
 | SEEK | ACK, jeśli bez adresu |
 | DISCOVER `0x08` (rozgłoszenie) | jeśli bez adresu: `AA 00 08 SN(LE) 03 03 04 XOR` po 20–520 albo 625–875 ms (szczelina z SN i numeru próby), gdy magistrala jest wolna; rezygnuje, gdy CLU wcześniej nada ramkę |
 | ADDR_ASSIGN(własny SN, a) | przyjmuje adres a, ACK |
-| STATUS_POLL | po zmianie `Value` przycisku, zmianie temperatury (o 0,1 °C) i po nadaniu adresu: ramka stanu `AA 00 0E CH CH VV VV TT TT 00…00 XOR` (13 B danych: maska zmienionych przycisków LE, `Value` przycisków LE, temperatura LE w 0,1 °C, światło = 0, bajt 10 = gest); jedna zmiana przycisku na zapytanie, więc krótkie dotknięcie dociera jako 1, potem 0; po geście ramka z jego flagą (`02` w górę, `04` w dół, `08` w lewo, `10` w prawo — zdarzenia PANEL OnGesture*, sprawdzone na prawdziwym CLU); inaczej samo ACK |
+| STATUS_POLL | po zmianie `Value` przycisku, zmianie temperatury (o 0,1 °C, nie częściej niż raz na Sensitivity czujnika — ramka `0x16`, domyślnie 1000 ms; prawdziwy panel tak samo próbkuje co Sensitivity) i po nadaniu adresu: ramka stanu `AA 00 0E CH CH VV VV TT TT 00…00 XOR` (13 B danych: maska zmienionych przycisków LE, `Value` przycisków LE, temperatura LE w 0,1 °C, światło = 0, bajt 10 = gest); jedna zmiana przycisku na zapytanie, więc krótkie dotknięcie dociera jako 1, potem 0; po geście ramka z jego flagą (`02` w górę, `04` w dół, `08` w lewo, `10` w prawo — zdarzenia PANEL OnGesture*, sprawdzone na prawdziwym CLU); inaczej samo ACK |
 | VERSION_QUERY | brak odpowiedzi (jak prawdziwy panel) |
 | LED_CMD `0x18 mask_lo mask_hi cmd` | zielona / czerwona / wył., ShowOK / ShowError migają 2 s |
 | TFBUS_CMD `0x31`: `0x0a` PRINT_TEXT, `0x19` DRAW, `0x0f` BEEP | rysowanie do bufora OLED i wyświetlanie, buzzer |
