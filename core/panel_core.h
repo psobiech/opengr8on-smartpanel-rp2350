@@ -50,7 +50,10 @@ enum { LED_SHOW_OK = 0x00, LED_SHOW_ERROR = 0x01, LED_GREEN = 0x02, LED_OFF = 0x
 
 typedef enum { LEDS_OFF = 0, LEDS_GREEN, LEDS_RED, LEDS_FLASH_GREEN, LEDS_FLASH_RED } led_state_t;
 
-typedef enum { OLED_BUTTONS = 0, OLED_FREEDRAW, OLED_TIMEOUT } oled_mode_t;
+typedef enum { OLED_BUTTONS = 0, OLED_FREEDRAW, OLED_TIMEOUT, OLED_GESTURE } oled_mode_t;
+
+// Swipe direction (finger movement), in PANEL event order: OnGestureUp / Down / Left / Right.
+typedef enum { PANEL_GESTURE_UP = 0, PANEL_GESTURE_DOWN, PANEL_GESTURE_LEFT, PANEL_GESTURE_RIGHT } panel_gesture_t;
 
 typedef struct {
     uint32_t serial_number;
@@ -76,6 +79,7 @@ typedef struct {
     bool has_temperature;
     bool state_frame_pending;     // send the state frame on the next poll even without a change
     int16_t reported_temperature_deci; // 0.1 C, last value sent in a state frame
+    uint8_t pending_ext_flags;    // gesture flags for the next state frame's ext byte, sent once
     // buttons
     bool slot_down[PANEL_SLOTS];
     uint8_t slot_button[PANEL_SLOTS]; // button index held by each pressed slot
@@ -93,6 +97,9 @@ typedef struct {
     uint8_t buttons_led_mode;     // 0 off, 1 location LEDs on, 2 for active
     uint8_t page_control_mode;    // 0 command, 1 gesture/command
     uint16_t proximity_timeout_ms; // stored only: no proximity sensor, the display stays on
+    uint8_t gesture_display_mode; // 0: gestures are not shown on the OLED
+    char gesture_icon[4][17];     // PANEL GestureIcon* per panel_gesture_t (empty: the direction name)
+    uint64_t gesture_shown_until_us; // OLED_GESTURE: back to the buttons at this time
     // OLED: draw buffer (commands) and shown buffer (after DRAW / DisplayContent), 1 bpp, row-major
     uint8_t oled_draw[OLED_W * OLED_H / 8];
     uint8_t oled_shown[OLED_W * OLED_H / 8];
@@ -121,9 +128,10 @@ void panel_touch(panel_t *panel, int slot, bool down, uint64_t now_us);
 // Release a pressed field because the touch turned into a swipe. The CLU derives its events from
 // Value, so for it this is an ordinary release.
 void panel_touch_cancel(panel_t *panel, int slot, uint64_t now_us);
-// Swipe on the display: direction -1 previous page, +1 next page (local only; wire format of
-// gesture events is not decoded, see README).
-void panel_swipe(panel_t *panel, int direction, uint64_t now_us);
+// Swipe on the display: reported to the CLU (PANEL OnGesture*) in the next state frame, shown on
+// the OLED while GestureDisplayMode is on; left / right also flip the page in PageControlMode 1
+// (left = next page).
+void panel_gesture(panel_t *panel, panel_gesture_t gesture, uint64_t now_us);
 
 void panel_set_temp(panel_t *panel, float celsius);
 

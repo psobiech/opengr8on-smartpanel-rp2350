@@ -10,6 +10,7 @@
 #define LED_FLASH_US       2000000 // ShowOK / ShowError: flash for 2 s ...
 #define LED_FLASH_PHASE_US 250000  // ... with a 500 ms period
 #define DRAW_TIMEOUT_US    1000000 // draw ops without DisplayContent -> "! TIMEOUT !" (window guessed)
+#define GESTURE_SHOW_US    1000000 // gesture name on the OLED (duration guessed)
 // DISCOVER reply delay: DISCOVER_FIRST_SLOT_US + slot * DISCOVER_SLOT_US, slot 0..DISCOVER_SLOTS-1
 // picked from the SN and the attempt number; delays from DISCOVER_GAP_START_US on are moved past
 // DISCOVER_GAP_US (20..520 ms, 625..875 ms). The real CLU keeps a DISCOVER open ~1 s and addresses
@@ -38,6 +39,7 @@ static void set_button_mode(panel_t *panel, uint16_t mask, uint8_t mode);
 static void tfbus_cmd(panel_t *panel, const uint8_t *data, uint64_t now_us);
 static void step_page(panel_t *panel, int direction);
 static void show_page(panel_t *panel, int page);
+static void show_gesture(panel_t *panel, panel_gesture_t gesture, uint64_t now_us);
 static void display_block(panel_t *panel, const uint8_t *block);
 static void copy_str(char *dst, size_t cap, const uint8_t *src, size_t max_length);
 static void ack(panel_t *panel);
@@ -70,6 +72,7 @@ void panel_init(panel_t *panel, uint32_t serial_number)
     panel->buttons_led_mode = 1;
     panel->page_control_mode = 1;
     panel->proximity_timeout_ms = 5000;
+    panel->gesture_display_mode = 1;
     render_buttons(panel);
 }
 
@@ -117,6 +120,9 @@ void panel_tick(panel_t *panel, uint64_t now_us)
         panel_oled_text(panel->oled_shown, 64 - oled_text_width("! TIMEOUT !", 1) / 2, 28, 1, "! TIMEOUT !");
         panel->oled_mode = OLED_TIMEOUT;
         panel->version++;
+    }
+    if (panel->oled_mode == OLED_GESTURE && now_us >= panel->gesture_shown_until_us) {
+        render_buttons(panel);
     }
 }
 
@@ -325,9 +331,12 @@ static uint32_t discover_delay_us(uint32_t serial_number, uint32_t attempt)
 
 // STATUS_POLL reply. The real CLU (firmware.bin: PANEL_BUTTON state handler 0xb14a2, sensor
 // handler 0xb1526, both given frame + 2) reads every SMART_PANEL reply by position, not as TLV:
-//   aa 00 0e | changed(LE16) | values(LE16) | temp(LE16, 0.1 C) | light(LE16) | 00 00 | ext 00 00 | xor
-// A button's Value is taken from `values` only while its bit in `changed` is set; frame byte 13
-// bits 7..5 select an extended record (gestures, page, proximity), 0 = none. The CLU derives
+//   aa 00 0e | changed(LE16) | values(LE16) | temp(LE16, 0.1 C) | light(LE16, 0.1 %) | 00 00 | ext 00 00 | xor
+// A button's Value is taken from `values` only while its bit in `changed` is set. Frame byte 13
+// (ext) carries one-shot flags, checked against PANEL events on a real CLU: 01 OnProximityDetect,
+// 02 OnGestureUp, 04 OnGestureDown, 08 OnGestureLeft, 10 OnGestureRight; 80 = display record
+// (all other bytes 0, byte 3 = 1 OnDisplayOn / 0 OnDisplayOff; not sent: the display stays on and
+// there is no proximity sensor). The CLU derives
 // OnSwitchOn / OnSwitchOff / OnChange / OnClick / OnHold ... from Value itself, so the panel sends
 // no button events. Like the real panels (capture 2026-10-14) it answers with a bare ACK when there
 // is nothing to report.
@@ -349,6 +358,10 @@ static void send_status(panel_t *panel)
         send_state_frame(panel, button_bit, temperature_deci);
         return;
     }
+    if (panel->pending_ext_flags) {
+        send_state_frame(panel, 0, temperature_deci);
+        return;
+    }
     if (panel->has_temperature &&
         (panel->state_frame_pending || temperature_deci != panel->reported_temperature_deci)) {
         send_state_frame(panel, 0, temperature_deci);
@@ -366,6 +379,8 @@ static void send_state_frame(panel_t *panel, uint16_t changed_buttons, int16_t t
                          (uint8_t)changed_buttons, (uint8_t)(changed_buttons >> 8),
                          (uint8_t)panel->reported_button_values, (uint8_t)(panel->reported_button_values >> 8),
                          (uint8_t)temperature_deci, (uint8_t)((uint16_t)temperature_deci >> 8)};
+    frame[13] = panel->pending_ext_flags;
+    panel->pending_ext_flags = 0;
     frame[16] = xor8(frame, 16);
     send(panel, frame, sizeof frame);
     panel->reported_temperature_deci = temperature_deci;
@@ -450,6 +465,7 @@ static void tfbus_cmd(panel_t *panel, const uint8_t *data, uint64_t now_us)
     case 0x0c: panel->buzzer_on = args[0] != 0; break;                                 // BuzzerValue
     case 0x14: panel->buttons_led_mode = args[0]; panel->version++; break;             // ButtonsLEDMode
     case 0x15: panel->page_control_mode = args[0]; break;                              // PageControlMode
+    case 0x16: panel->gesture_display_mode = args[0]; break;                           // GestureDisplayMode
     // Page commands (capture 2026-11-26, real CLU): SetPageNr(n) -> 0x10 [n], SetNextPage -> 0x17,
     // SetPrevPage -> 0x18. They work in any PageControlMode. Init pass 2 sends PageNr 0: ignored.
     case 0x10:
@@ -459,7 +475,7 @@ static void tfbus_cmd(panel_t *panel, const uint8_t *data, uint64_t now_us)
         break;
     case 0x17: step_page(panel, +1); break;
     case 0x18: step_page(panel, -1); break;
-    case 0x01: case 0x0d: case 0x0e: case 0x11: case 0x16:              // sens / gesture / page modes
+    case 0x01: case 0x0d: case 0x0e: case 0x11:                         // sens / gesture / page modes
     case 0x12: case 0x1a:                                                // page / button config (undecoded)
         break;
     default:
@@ -470,11 +486,18 @@ static void tfbus_cmd(panel_t *panel, const uint8_t *data, uint64_t now_us)
 }
 
 // DISPLAY_BLOCK (0x30): chan sub data[20]. Button config: chan = button, sub 0x00 / 0x01 / 0x0a
-// (meaning per sub guessed: IconA / IconB / Label). chan 0 sub 2..5 = gesture icons left/right/up/down.
+// (meaning per sub guessed: IconA / IconB / Label). chan 0 sub 2..5 = PANEL gesture icons.
 static void display_block(panel_t *panel, const uint8_t *block)
 {
     uint8_t channel = block[0], sub = block[1];
     const uint8_t *block_data = block + 2;
+    // PANEL GestureIcon*: sub 2 left, 3 right, 4 up, 5 down (the CLU driver's order)
+    static const panel_gesture_t k_gesture_by_sub[4] = {PANEL_GESTURE_LEFT, PANEL_GESTURE_RIGHT, PANEL_GESTURE_UP,
+                                                        PANEL_GESTURE_DOWN};
+    if (channel == 0 && sub >= 0x02 && sub <= 0x05) {
+        copy_str(panel->gesture_icon[k_gesture_by_sub[sub - 2]], 17, block_data, 16);
+        return;
+    }
     if (channel < PANEL_BUTTONS && (sub == 0x00 || sub == 0x0a)) {
         // Label (SetLabel, sub 0x0a) is shown only at the button's corner (UI), not on the OLED.
         char *dst = sub == 0x0a ? panel->label[channel] : panel->icon_a[channel];
@@ -554,13 +577,16 @@ void panel_touch_cancel(panel_t *panel, int slot, uint64_t now_us)
     panel_touch(panel, slot, false, now_us);
 }
 
-void panel_swipe(panel_t *panel, int direction, uint64_t now_us)
+void panel_gesture(panel_t *panel, panel_gesture_t gesture, uint64_t now_us)
 {
-    (void)now_us;
-    if (!panel->page_control_mode) {
-        return;
+    static const uint8_t k_ext_flag[4] = {0x02, 0x04, 0x08, 0x10}; // per panel_gesture_t
+    panel->pending_ext_flags |= k_ext_flag[gesture];
+    if (panel->page_control_mode && (gesture == PANEL_GESTURE_LEFT || gesture == PANEL_GESTURE_RIGHT)) {
+        step_page(panel, gesture == PANEL_GESTURE_LEFT ? +1 : -1);
     }
-    step_page(panel, direction);
+    if (panel->gesture_display_mode && (panel->oled_mode == OLED_BUTTONS || panel->oled_mode == OLED_GESTURE)) {
+        show_gesture(panel, gesture, now_us);
+    }
 }
 
 // Next (+1) / previous (-1) page, wrapping around.
@@ -574,6 +600,21 @@ static void show_page(panel_t *panel, int page)
 {
     panel->page = (uint8_t)page;
     render_buttons(panel);
+}
+
+// Gesture icon text (or the direction name) centred on the OLED until GESTURE_SHOW_US has passed.
+static void show_gesture(panel_t *panel, panel_gesture_t gesture, uint64_t now_us)
+{
+    static const char *const k_gesture_names[4] = {"Up", "Down", "Left", "Right"};
+    char text[17];
+    snprintf(text, sizeof text, "%s", panel->gesture_icon[gesture][0] ? panel->gesture_icon[gesture]
+                                                                       : k_gesture_names[gesture]);
+    text[10] = 0; // 10 chars fit the width at size 2
+    memset(panel->oled_shown, 0, sizeof panel->oled_shown);
+    panel_oled_text(panel->oled_shown, 64 - oled_text_width(text, 2) / 2, 24, 2, text);
+    panel->oled_mode = OLED_GESTURE;
+    panel->gesture_shown_until_us = now_us + GESTURE_SHOW_US;
+    panel->version++;
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -94,7 +94,8 @@ static uint64_t s_release_us[PANEL_SLOTS];
 // has stayed within DRAG_PX of its start for PRESS_DELAY_US (or lifted earlier: a tap), with the
 // touch-down time as its start, so a drag never reaches the CLU. A finger moving DRAG_PX is a drag
 // and counts no more; if it was already pressed, the press is released (an ordinary release for
-// the CLU). In page control mode a drag of SWIPE_PX sideways also flips the page.
+// the CLU). A drag of SWIPE_PX is a gesture (PANEL OnGesture*, by its main axis); sideways it also
+// flips the page in page control mode.
 // A finger is gone after TOUCH_RELEASE_US without it in the reports (debounce), or when reports
 // stop for TOUCH_STALE_US.
 // ---------------------------------------------------------------------------------------------
@@ -314,9 +315,12 @@ static void touch_poll(bsp_touch_interface_t *touch, uint64_t now)
         if (finger->field >= 0 && !finger->pressed && now - finger->down_us >= PRESS_DELAY_US) {
             finger_press(finger);
         }
-        if (!finger->swiped && s_panel.page_control_mode && abs(move_x) > SWIPE_PX) {
-            finger->swiped = true; // swipe left = next page
-            LOCKED(panel_swipe(&s_panel, move_x < 0 ? +1 : -1, now));
+        if (!finger->swiped && (abs(move_x) > SWIPE_PX || abs(move_y) > SWIPE_PX)) {
+            finger->swiped = true;
+            panel_gesture_t gesture = abs(move_x) >= abs(move_y)
+                                          ? (move_x < 0 ? PANEL_GESTURE_LEFT : PANEL_GESTURE_RIGHT)
+                                          : (move_y < 0 ? PANEL_GESTURE_UP : PANEL_GESTURE_DOWN);
+            LOCKED(panel_gesture(&s_panel, gesture, now));
         }
     }
 

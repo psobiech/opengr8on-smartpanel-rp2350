@@ -62,25 +62,30 @@ Działa:
 | SEEK | ACK, jeśli bez adresu |
 | DISCOVER `0x08` (rozgłoszenie) | jeśli bez adresu: `AA 00 08 SN(LE) 03 03 04 XOR` po 20–520 albo 625–875 ms (szczelina z SN i numeru próby), gdy magistrala jest wolna; rezygnuje, gdy CLU wcześniej nada ramkę |
 | ADDR_ASSIGN(własny SN, a) | przyjmuje adres a, ACK |
-| STATUS_POLL | po zmianie `Value` przycisku, zmianie temperatury (o 0,1 °C) i po nadaniu adresu: ramka stanu `AA 00 0E CH CH VV VV TT TT 00…00 XOR` (13 B danych: maska zmienionych przycisków LE, `Value` przycisków LE, temperatura LE w 0,1 °C, światło i rekord rozszerzony = 0); jedna zmiana przycisku na zapytanie, więc krótkie dotknięcie dociera jako 1, potem 0; inaczej samo ACK |
+| STATUS_POLL | po zmianie `Value` przycisku, zmianie temperatury (o 0,1 °C) i po nadaniu adresu: ramka stanu `AA 00 0E CH CH VV VV TT TT 00…00 XOR` (13 B danych: maska zmienionych przycisków LE, `Value` przycisków LE, temperatura LE w 0,1 °C, światło = 0, bajt 10 = gest); jedna zmiana przycisku na zapytanie, więc krótkie dotknięcie dociera jako 1, potem 0; po geście ramka z jego flagą (`02` w górę, `04` w dół, `08` w lewo, `10` w prawo — zdarzenia PANEL OnGesture*, sprawdzone na prawdziwym CLU); inaczej samo ACK |
 | VERSION_QUERY | brak odpowiedzi (jak prawdziwy panel) |
 | LED_CMD `0x18 mask_lo mask_hi cmd` | zielona / czerwona / wył., ShowOK / ShowError migają 2 s |
 | TFBUS_CMD `0x31`: `0x0a` PRINT_TEXT, `0x19` DRAW, `0x0f` BEEP | rysowanie do bufora OLED i wyświetlanie, buzzer |
 | TFBUS_CMD `0x31`: `0x17` SetNextPage, `0x18` SetPrevPage, `0x10 n` SetPageNr | zmiana strony (z zawijaniem 4 → 1); `0x10 00` z inicjalizacji jest pomijane |
+| TFBUS_CMD `0x31 0x16 n` GestureDisplayMode, `0x30` kanał 0 podkomendy 2–5 (ikony gestów) | przy n ≠ 0 gest jest pokazywany na OLED-zie przez 1 s (tekst ikony albo nazwa kierunku; wygląd i czas założone) |
 | każda inna ramka unicast | ACK |
 
 Brakuje / nie zostało rozpoznane:
 
 - **Wgrywanie konfiguracji stron i przycisków** (podkomendy `0x30` DISPLAY_BLOCK, `0x31 0x12`,
   `0x31 0x1a`, `0x17`). Strony mają domyślny układ (strona p, slot s → przycisk 4(p−1)+s).
+  Teksty stron przychodzą jako `0x31 12 p pole slot tekst…` (PageName: pole 01 slot 00,
+  Object_n_Name: pole 04 slot n; sprawdzone na prawdziwym CLU), ale prawdziwy panel ich nie
+  pokazał, więc panel je pomija.
   Podkomenda `0x0a` w `0x30` to etykieta przycisku (SetLabel; potwierdzone przechwytem) — widoczna
   tylko w rogu przycisku, nie na OLED-zie. Założenie: `0x00` to IconA (pokazywana na OLED-zie jako
   tekst — brak ikon BMP).
 - **Polecenia rysowania** ClearScreen, DrawLine, DrawPoint, DrawIcon, PrintFloat, ShowButtons —
   format ramek nieznany.
-- **Gesty, zbliżenie i czujnik światła** — panel nie wysyła tych zdarzeń do CLU. Płytka nie ma
-  czujnika zbliżeniowego ani światła, więc `ProximityTimeout` jest przyjmowany, ale ignorowany
-  (ekran nie gaśnie).
+- **Zbliżenie, wygaszanie ekranu i czujnik światła** — płytka nie ma czujnika zbliżeniowego ani
+  światła, więc panel nie wysyła flagi zbliżenia (`01`) ani rekordu ekranu (`80`: OnDisplayOn /
+  OnDisplayOff), a `ProximityTimeout` jest przyjmowany, ale ignorowany (ekran nie gaśnie). Gesty
+  to przesunięcia palcem po ekranie (prawdziwy panel rozpoznaje je bezdotykowo).
 - **Mapowanie ustawień TFBUS_CMD** (`0x02` ProximityTimeout, `0x0c` BuzzerValue, `0x14`
   ButtonsLEDMode) wywnioskowane z kolejności wartości w zrzucie magistrali, niepotwierdzone.
   `0x15` PageControlMode potwierdzone zrzutem (`SetPageControlMode` → `31 15 nn`): w trybie

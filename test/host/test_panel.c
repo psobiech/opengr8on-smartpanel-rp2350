@@ -314,16 +314,42 @@ int main(int argc, char **argv)
     panel_touch(panel, 2, false, now);
     poll(panel, 0x12);
 
-    // ---- pages: swipe -> page 2, slot 0 = button 4 ----
-    panel_swipe(panel, +1, now);
-    check("swipe next page", panel->page == 2 && panel_slot_button(panel, 0) == 4);
+    // ---- gestures: swipe left -> page 2 (slot 0 = button 4), ext flag 08 rides on the next state frame ----
+    panel_gesture(panel, PANEL_GESTURE_LEFT, now);
+    check("swipe left: next page", panel->page == 2 && panel_slot_button(panel, 0) == 4);
+    check("swipe left: \"Left\" on the OLED", panel->oled_mode == OLED_GESTURE);
+    panel_tick(panel, now + 999999);
+    check("gesture shown for 1 s", panel->oled_mode == OLED_GESTURE);
+    panel_tick(panel, now + 1000000);
+    check("then back to the buttons", panel->oled_mode == OLED_BUTTONS);
     panel_touch(panel, 0, true, now);
     tx_reset();
     poll(panel, 0x12);
-    check_tx("page 2 slot 0 -> button 4 Value 1", "aa000e10001000e900000000000000004d ");
+    poll(panel, 0x12);
+    check_tx("page 2 slot 0 -> button 4 Value 1, OnGestureLeft (08) once",
+             "aa000e10001000e9000000000008000045 aa0001ab ");
     panel_touch(panel, 0, false, now);
     poll(panel, 0x12);
-    panel_swipe(panel, -1, now);
+    panel_gesture(panel, PANEL_GESTURE_RIGHT, now);
+    check("swipe right: previous page", panel->page == 1);
+    tx_reset();
+    poll(panel, 0x12);
+    check_tx("swipe right: state frame with OnGestureRight (10) alone", "aa000e00000000e900000000001000005d ");
+    panel_gesture(panel, PANEL_GESTURE_UP, now);
+    check("swipe up: page unchanged", panel->page == 1);
+    tx_reset();
+    poll(panel, 0x12);
+    check_tx("swipe up: OnGestureUp (02)", "aa000e00000000e900000000000200004f ");
+    {
+        uint8_t gesture_display_off[22] = {0x16, 0};
+        frame(panel, 0x12, 0x31, gesture_display_off, sizeof gesture_display_off);
+        panel_tick(panel, now + 2000000);
+        panel_gesture(panel, PANEL_GESTURE_DOWN, now + 2000000);
+        check("GestureDisplayMode 0: not shown", panel->oled_mode == OLED_BUTTONS);
+        uint8_t gesture_display_on[22] = {0x16, 1};
+        frame(panel, 0x12, 0x31, gesture_display_on, sizeof gesture_display_on);
+        poll(panel, 0x12);
+    }
 
     // ---- page commands from the real CLU (capture 2026-11-26): 0x17 next, 0x18 prev, 0x10 [n] PageNr ----
     {
