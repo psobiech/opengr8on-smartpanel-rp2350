@@ -325,6 +325,32 @@ int main(int argc, char **argv)
     poll(panel, 0x12);
     panel_swipe(panel, -1, now);
 
+    // ---- page commands from the real CLU (capture 2026-11-26): 0x17 next, 0x18 prev, 0x10 [n] PageNr ----
+    {
+        uint32_t unknown_before = panel->frames_unknown;
+        uint8_t next_page_command[22] = {0x17}, previous_page_command[22] = {0x18};
+        uint8_t page_number_command[22] = {0x10, 4};
+        frame(panel, 0x12, 0x31, next_page_command, sizeof next_page_command);
+        check("SetNextPage -> page 2", panel->page == 2 && panel_slot_button(panel, 0) == 4);
+        frame(panel, 0x12, 0x31, previous_page_command, sizeof previous_page_command);
+        frame(panel, 0x12, 0x31, previous_page_command, sizeof previous_page_command);
+        check("SetPrevPage x2 -> wraps to page 4", panel->page == 4);
+        frame(panel, 0x12, 0x31, page_number_command, sizeof page_number_command);
+        page_number_command[1] = 3;
+        frame(panel, 0x12, 0x31, page_number_command, sizeof page_number_command);
+        check("SetPageNr 3 -> page 3", panel->page == 3 && panel_slot_button(panel, 0) == 8);
+        page_number_command[1] = 0;
+        frame(panel, 0x12, 0x31, page_number_command, sizeof page_number_command);
+        check("PageNr 0 (init pass 2) -> page kept", panel->page == 3);
+        panel->page_control_mode = 0;
+        frame(panel, 0x12, 0x31, next_page_command, sizeof next_page_command);
+        check("SetNextPage works in PageControlMode Command", panel->page == 4);
+        panel->page_control_mode = 1;
+        page_number_command[1] = 1;
+        frame(panel, 0x12, 0x31, page_number_command, sizeof page_number_command);
+        check("page commands: none unknown", panel->frames_unknown == unknown_before && panel->page == 1);
+    }
+
     // ---- SetLabel (real CLU: 0x30 [button, 0x0a, text]): corner label only, OLED untouched ----
     {
         uint8_t label_block[22] = {0x00, 0x0a, 'a', 'a', 'a', 'a'};

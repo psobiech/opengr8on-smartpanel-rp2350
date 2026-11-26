@@ -66,6 +66,7 @@ Działa:
 | VERSION_QUERY | brak odpowiedzi (jak prawdziwy panel) |
 | LED_CMD `0x18 mask_lo mask_hi cmd` | zielona / czerwona / wył., ShowOK / ShowError migają 2 s |
 | TFBUS_CMD `0x31`: `0x0a` PRINT_TEXT, `0x19` DRAW, `0x0f` BEEP | rysowanie do bufora OLED i wyświetlanie, buzzer |
+| TFBUS_CMD `0x31`: `0x17` SetNextPage, `0x18` SetPrevPage, `0x10 n` SetPageNr | zmiana strony (z zawijaniem 4 → 1); `0x10 00` z inicjalizacji jest pomijane |
 | każda inna ramka unicast | ACK |
 
 Brakuje / nie zostało rozpoznane:
@@ -81,8 +82,9 @@ Brakuje / nie zostało rozpoznane:
   czujnika zbliżeniowego ani światła, więc `ProximityTimeout` jest przyjmowany, ale ignorowany
   (ekran nie gaśnie).
 - **Mapowanie ustawień TFBUS_CMD** (`0x02` ProximityTimeout, `0x0c` BuzzerValue, `0x14`
-  ButtonsLEDMode, `0x15` PageControlMode) wywnioskowane z kolejności wartości w zrzucie magistrali,
-  niepotwierdzone.
+  ButtonsLEDMode) wywnioskowane z kolejności wartości w zrzucie magistrali, niepotwierdzone.
+  `0x15` PageControlMode potwierdzone zrzutem (`SetPageControlMode` → `31 15 nn`): w trybie
+  Command (0) przesunięcie palcem nie zmienia strony, działają tylko polecenia z CLU.
 - **Kolizje DISCOVER**: prawdziwe CLU czeka po DISCOVER ok. 1 s i adresuje każdy moduł, który
   w tym czasie odpowiedział (zrzut: ten panel po 369 ms, RELAY po 577 ms, oba dostały adres).
   Moduły unikają kolizji tylko różnym opóźnieniem: panel odpowiada w jednej z 32 szczelin co 25 ms

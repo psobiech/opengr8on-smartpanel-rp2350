@@ -36,6 +36,8 @@ static uint32_t discover_delay_us(uint32_t serial_number, uint32_t attempt);
 static void apply_led(panel_t *panel, uint16_t mask, uint8_t cmd, uint64_t now_us);
 static void set_button_mode(panel_t *panel, uint16_t mask, uint8_t mode);
 static void tfbus_cmd(panel_t *panel, const uint8_t *data, uint64_t now_us);
+static void step_page(panel_t *panel, int direction);
+static void show_page(panel_t *panel, int page);
 static void display_block(panel_t *panel, const uint8_t *block);
 static void copy_str(char *dst, size_t cap, const uint8_t *src, size_t max_length);
 static void ack(panel_t *panel);
@@ -448,7 +450,16 @@ static void tfbus_cmd(panel_t *panel, const uint8_t *data, uint64_t now_us)
     case 0x0c: panel->buzzer_on = args[0] != 0; break;                                 // BuzzerValue
     case 0x14: panel->buttons_led_mode = args[0]; panel->version++; break;             // ButtonsLEDMode
     case 0x15: panel->page_control_mode = args[0]; break;                              // PageControlMode
-    case 0x01: case 0x0d: case 0x0e: case 0x10: case 0x11: case 0x16:   // sens / gesture / page modes
+    // Page commands (capture 2026-11-26, real CLU): SetPageNr(n) -> 0x10 [n], SetNextPage -> 0x17,
+    // SetPrevPage -> 0x18. They work in any PageControlMode. Init pass 2 sends PageNr 0: ignored.
+    case 0x10:
+        if (args[0] >= 1 && args[0] <= PANEL_PAGES) {
+            show_page(panel, args[0]);
+        }
+        break;
+    case 0x17: step_page(panel, +1); break;
+    case 0x18: step_page(panel, -1); break;
+    case 0x01: case 0x0d: case 0x0e: case 0x11: case 0x16:              // sens / gesture / page modes
     case 0x12: case 0x1a:                                                // page / button config (undecoded)
         break;
     default:
@@ -549,8 +560,19 @@ void panel_swipe(panel_t *panel, int direction, uint64_t now_us)
     if (!panel->page_control_mode) {
         return;
     }
+    step_page(panel, direction);
+}
+
+// Next (+1) / previous (-1) page, wrapping around.
+static void step_page(panel_t *panel, int direction)
+{
     int new_page = panel->page + (direction > 0 ? 1 : -1);
-    panel->page = (uint8_t)(new_page < 1 ? PANEL_PAGES : new_page > PANEL_PAGES ? 1 : new_page);
+    show_page(panel, new_page < 1 ? PANEL_PAGES : new_page > PANEL_PAGES ? 1 : new_page);
+}
+
+static void show_page(panel_t *panel, int page)
+{
+    panel->page = (uint8_t)page;
     render_buttons(panel);
 }
 
