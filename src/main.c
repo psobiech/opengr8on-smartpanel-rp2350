@@ -93,8 +93,8 @@ static uint64_t s_release_us[PANEL_SLOTS];
 // which is pressed while at least one finger holds it. A press is committed only once the finger
 // has stayed within DRAG_PX of its start for PRESS_DELAY_US (or lifted earlier: a tap), with the
 // touch-down time as its start, so a drag never reaches the CLU. A finger moving DRAG_PX is a drag
-// and counts no more; if it was already pressed, the press is cancelled (OnSwitchOff without
-// OnClick). In page control mode a drag of SWIPE_PX sideways also flips the page.
+// and counts no more; if it was already pressed, the press is released (an ordinary release for
+// the CLU). In page control mode a drag of SWIPE_PX sideways also flips the page.
 // A finger is gone after TOUCH_RELEASE_US without it in the reports (debounce), or when reports
 // stop for TOUCH_STALE_US.
 // ---------------------------------------------------------------------------------------------

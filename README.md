@@ -35,10 +35,11 @@ Ekran odwzorowuje panel w nowoczesnej formie:
 - **Pasek stanu** pod OLED-em: połączenie z CLU, adres RS485, temperatura; dopóki CLU nie nada
   adresu — numer seryjny.
 
-Zdarzenia przycisków generuje panel, tak jak prawdziwy: naciśnięcie → `OnSwitchOn`, `OnChange`;
-puszczenie → `OnSwitchOff`, `OnChange`, potem `OnClick` (< 0,5 s) / `OnShortPress` (< 2 s) /
-`OnLongPress`; `OnHold` po `HoldDelay` (1000 ms) i co `HoldInterval` (100 ms). Palec, który
-przesuwa stronę, anuluje swoje naciśnięcie (`OnSwitchOff` + `OnChange`, bez `OnClick`).
+Panel, tak jak prawdziwy, nie wysyła zdarzeń przycisków — zgłasza tylko zmiany `Value`
+(naciśnięty / puszczony), a zdarzenia (`OnSwitchOn`, `OnSwitchOff`, `OnChange`, `OnClick`,
+`OnShortPress`, `OnLongPress`, `OnHold`) wylicza z nich CLU. Tryb przycisku (`Mode`) stosuje panel:
+bistabilny przełącza `Value` przy każdym naciśnięciu, zablokowany nic nie zgłasza. Palec, który
+przesuwa stronę, puszcza swoje naciśnięcie — dla CLU to zwykłe puszczenie.
 
 Struktura:
 
@@ -61,7 +62,7 @@ Działa:
 | SEEK | ACK, jeśli bez adresu |
 | DISCOVER `0x08` (rozgłoszenie) | jeśli bez adresu: `AA 00 08 SN(LE) 03 03 04 XOR` po 20–520 albo 625–875 ms (szczelina z SN i numeru próby), gdy magistrala jest wolna; rezygnuje, gdy CLU wcześniej nada ramkę |
 | ADDR_ASSIGN(własny SN, a) | przyjmuje adres a, ACK |
-| STATUS_POLL | zdarzenie przycisku: `02 06 01 01 00 08 02 10 VAL 00` (jedno na zapytanie, VAL = przycisk×7 + zdarzenie); inaczej po zmianie temperatury (o 0,1 °C), po nadaniu adresu i po zdarzeniach: ramka czujników `00 00 00 00 TT TT 00…` (13 B, temperatura LE w 0,1 °C — prawdziwe CLU czyta temperaturę tylko z niej, z bajtów 7–8 każdej odpowiedzi); inaczej samo ACK |
+| STATUS_POLL | po zmianie `Value` przycisku, zmianie temperatury (o 0,1 °C) i po nadaniu adresu: ramka stanu `AA 00 0E CH CH VV VV TT TT 00…00 XOR` (13 B danych: maska zmienionych przycisków LE, `Value` przycisków LE, temperatura LE w 0,1 °C, światło i rekord rozszerzony = 0); jedna zmiana przycisku na zapytanie, więc krótkie dotknięcie dociera jako 1, potem 0; inaczej samo ACK |
 | VERSION_QUERY | brak odpowiedzi (jak prawdziwy panel) |
 | LED_CMD `0x18 mask_lo mask_hi cmd` | zielona / czerwona / wył., ShowOK / ShowError migają 2 s |
 | TFBUS_CMD `0x31`: `0x0a` PRINT_TEXT, `0x19` DRAW, `0x0f` BEEP | rysowanie do bufora OLED i wyświetlanie, buzzer |
