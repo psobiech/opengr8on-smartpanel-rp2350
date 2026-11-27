@@ -462,9 +462,16 @@ static void tfbus_cmd(panel_t *panel, const uint8_t *data, uint64_t now_us)
         panel->draw_pending = true;
         break;
     }
-    case 0x19: // DRAW / DisplayContent: show the draw buffer
-        memcpy(panel->oled_shown, panel->oled_draw, sizeof panel->oled_shown);
+    case 0x04: // ClearScreen: only this blanks the draw buffer; a shown freedraw screen goes blank too
         memset(panel->oled_draw, 0, sizeof panel->oled_draw);
+        if (panel->oled_mode == OLED_FREEDRAW) {
+            memset(panel->oled_shown, 0, sizeof panel->oled_shown);
+            panel->version++;
+        }
+        break;
+    case 0x09: // DisplayContent (ESP32 CLU driver)
+    case 0x19: // Draw: show the draw buffer; it is kept, so later texts add to it
+        memcpy(panel->oled_shown, panel->oled_draw, sizeof panel->oled_shown);
         panel->draw_pending = false;
         panel->oled_mode = OLED_FREEDRAW;
         panel->version++;

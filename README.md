@@ -80,8 +80,10 @@ Brakuje / nie zostało rozpoznane:
   Podkomenda `0x0a` w `0x30` to etykieta przycisku (SetLabel; potwierdzone przechwytem) — widoczna
   tylko w rogu przycisku, nie na OLED-zie. Założenie: `0x00` to IconA (pokazywana na OLED-zie jako
   tekst — brak ikon BMP).
-- **Polecenia rysowania** ClearScreen, DrawLine, DrawPoint, DrawIcon, PrintFloat, ShowButtons —
-  format ramek nieznany.
+- **Polecenia rysowania** ClearScreen (`0x04`), DrawLine (`0x06 [x y xe ye kolor]`), DrawPoint
+  (`0x07 [x y kolor]`), DrawIcon (`0x08 [x y plik(16) 0]`), DrawBox (`0x1b [x y w h kolor]`),
+  ShowButtons (`0x03`) — format ramek znany (sterownik CLU je wysyła), panel ich jeszcze nie rysuje.
+  PrintFloat przychodzi jako zwykły PrintText (`0x0a`).
 - **Zbliżenie, wygaszanie ekranu i czujnik światła** — płytka nie ma czujnika zbliżeniowego ani
   światła, więc panel nie wysyła flagi zbliżenia (`01`) ani rekordu ekranu (`80`: OnDisplayOn /
   OnDisplayOff), a `ProximityTimeout` jest przyjmowany, ale ignorowany (ekran nie gaśnie). Gesty

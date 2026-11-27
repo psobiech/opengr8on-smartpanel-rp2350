@@ -437,6 +437,28 @@ int main(int argc, char **argv)
         check("PrintText + DRAW -> pixels shown", panel->oled_mode == OLED_FREEDRAW &&
                                                      panel_oled_pixel(panel, 10, 20) &&
                                                      panel_oled_pixel(panel, 10, 26) && !panel_oled_pixel(panel, 10, 27));
+        // second line: the first one stays until ClearScreen
+        uint8_t second_line[22] = {0x0a, 10, 40, 1, 'H'};
+        frame_length = tfbus_cmd(frame_buffer, sizeof frame_buffer, 0x12, second_line[0], second_line + 1, 21);
+        panel_rx(panel, frame_buffer, frame_length, now);
+        now += 1000;
+        frame_length = tfbus_cmd(frame_buffer, sizeof frame_buffer, 0x12, 0x09, NULL, 0); // DisplayContent
+        panel_rx(panel, frame_buffer, frame_length, now);
+        now += 1000;
+        panel_tick(panel, now);
+        check("second PrintText + DisplayContent keeps the first line", panel_oled_pixel(panel, 10, 20) &&
+                                                               panel_oled_pixel(panel, 10, 40));
+        frame_length = tfbus_cmd(frame_buffer, sizeof frame_buffer, 0x12, 0x04, NULL, 0);
+        panel_rx(panel, frame_buffer, frame_length, now);
+        now += 1000;
+        panel_tick(panel, now);
+        bool cleared_lit = false;
+        for (int y = 0; y < OLED_H; y++) {
+            for (int x = 0; x < OLED_W; x++) {
+                cleared_lit |= panel_oled_pixel(panel, x, y);
+            }
+        }
+        check("ClearScreen blanks the freedraw screen", !cleared_lit && panel->oled_mode == OLED_FREEDRAW);
         frame_length = tfbus_cmd(frame_buffer, sizeof frame_buffer, 0x12, 0x0a, (const uint8_t[]){0, 0, 2, 'X'}, 4);
         panel_rx(panel, frame_buffer, frame_length, now);
         now += 1100000;
