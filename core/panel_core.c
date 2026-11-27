@@ -11,6 +11,7 @@
 #define LED_FLASH_PHASE_US 250000  // ... with a 500 ms period
 #define DRAW_TIMEOUT_US    1000000 // draw ops without DisplayContent -> "! TIMEOUT !" (window guessed)
 #define GESTURE_SHOW_US    1000000 // gesture name on the OLED (duration guessed)
+#define PROXIMITY_TIMEOUT_MIN_MS 1000 // PANEL ProximityTimeout range 1000-60000 ms
 // DISCOVER reply delay: DISCOVER_FIRST_SLOT_US + slot * DISCOVER_SLOT_US, slot 0..DISCOVER_SLOTS-1
 // picked from the SN and the attempt number; delays from DISCOVER_GAP_START_US on are moved past
 // DISCOVER_GAP_US (20..520 ms, 625..875 ms). The real CLU keeps a DISCOVER open ~1 s and addresses
@@ -32,6 +33,8 @@ static void resync(panel_t *panel);
 static void handle_frame(panel_t *panel, const uint8_t *frame, size_t frame_length, uint64_t now_us);
 static void send_status(panel_t *panel, uint64_t now_us);
 static void send_state_frame(panel_t *panel, uint16_t changed_buttons, int16_t temperature_deci);
+static void send_display_record(panel_t *panel);
+static void display_wake(panel_t *panel, uint64_t now_us);
 static void service_discover_reply(panel_t *panel, uint64_t now_us);
 static uint32_t discover_delay_us(uint32_t serial_number, uint32_t attempt);
 static void apply_led(panel_t *panel, uint16_t mask, uint8_t cmd, uint64_t now_us);
@@ -72,6 +75,8 @@ void panel_init(panel_t *panel, uint32_t serial_number)
     panel->buttons_led_mode = 1;
     panel->page_control_mode = 1;
     panel->proximity_timeout_ms = 5000;
+    panel->display_on = true;
+    panel->reported_display_on = true;
     panel->gesture_display_mode = 1;
     panel->temperature_period_ms = 1000; // PANELSENSTEMP Sensitivity default
     render_buttons(panel);
@@ -124,6 +129,12 @@ void panel_tick(panel_t *panel, uint64_t now_us)
     }
     if (panel->oled_mode == OLED_GESTURE && now_us >= panel->gesture_shown_until_us) {
         render_buttons(panel);
+    }
+    uint32_t timeout_ms = panel->proximity_timeout_ms < PROXIMITY_TIMEOUT_MIN_MS ? PROXIMITY_TIMEOUT_MIN_MS
+                                                                                 : panel->proximity_timeout_ms;
+    if (panel->display_on && (int64_t)(now_us - panel->display_activity_us) >= (int64_t)timeout_ms * 1000) {
+        panel->display_on = false;
+        panel->version++;
     }
 }
 
@@ -345,13 +356,18 @@ static uint32_t discover_delay_us(uint32_t serial_number, uint32_t attempt)
 // A button's Value is taken from `values` only while its bit in `changed` is set. Frame byte 13
 // (ext) carries one-shot flags, checked against PANEL events on a real CLU: 01 OnProximityDetect,
 // 02 OnGestureUp, 04 OnGestureDown, 08 OnGestureLeft, 10 OnGestureRight; 80 = display record
-// (all other bytes 0, byte 3 = 1 OnDisplayOn / 0 OnDisplayOff; not sent: the display stays on and
-// there is no proximity sensor). The CLU derives
+// (all other bytes 0, byte 3 = 1 OnDisplayOn / 0 OnDisplayOff; see send_display_record). There is
+// no proximity sensor: the proximity flag goes with a touch that wakes the display
+// (panel_display_touch). The CLU derives
 // OnSwitchOn / OnSwitchOff / OnChange / OnClick / OnHold ... from Value itself, so the panel sends
 // no button events. Like the real panels (capture 2026-10-14) it answers with a bare ACK when there
 // is nothing to report.
 static void send_status(panel_t *panel, uint64_t now_us)
 {
+    if (panel->display_on != panel->reported_display_on) {
+        send_display_record(panel);
+        return;
+    }
     int16_t temperature_deci = panel->has_temperature ? (int16_t)(panel->temperature_centi / 10) // same rounding as the screen
                                                       : panel->reported_temperature_deci;
     int change = pop_change(panel);
@@ -399,6 +415,41 @@ static void send_state_frame(panel_t *panel, uint16_t changed_buttons, int16_t t
     send(panel, frame, sizeof frame);
     panel->reported_temperature_deci = temperature_deci;
     panel->state_frame_pending = false;
+}
+
+// Display record (OnDisplayOn / OnDisplayOff), as the ESP32 CLU driver decodes it: a state frame
+// with ext 0x80 and all other bytes 0 except byte 3 (1 on, 0 off). It carries no buttons or
+// temperature, so their reported state is left as it was. Only the latest state is sent: a sleep
+// and a wake between two polls report nothing.
+static void send_display_record(panel_t *panel)
+{
+    uint8_t frame[17] = {0xaa, 0x00, 0x0e, panel->display_on ? 0x01 : 0x00};
+    frame[13] = 0x80;
+    frame[16] = xor8(frame, 16);
+    send(panel, frame, sizeof frame);
+    panel->reported_display_on = panel->display_on;
+}
+
+// A real panel wakes on proximity: the display-on record, then a frame with OnProximityDetect (01)
+// (ESP32 CLU driver). A touch stands in for the proximity detection, so a waking touch sends both.
+bool panel_display_touch(panel_t *panel, uint64_t now_us)
+{
+    bool was_on = panel->display_on;
+    display_wake(panel, now_us);
+    if (!was_on) {
+        panel->pending_ext_flags |= 0x01; // OnProximityDetect
+    }
+    return !was_on;
+}
+
+// Touch / SwitchOnDisplay: the display is on, the ProximityTimeout countdown starts again.
+static void display_wake(panel_t *panel, uint64_t now_us)
+{
+    panel->display_activity_us = now_us;
+    if (!panel->display_on) {
+        panel->display_on = true;
+        panel->version++;
+    }
 }
 
 static void apply_led(panel_t *panel, uint16_t mask, uint8_t cmd, uint64_t now_us)
@@ -452,6 +503,7 @@ static void tfbus_cmd(panel_t *panel, const uint8_t *data, uint64_t now_us)
     uint8_t cmd = data[0];
     const uint8_t *args = data + 1;
     switch (cmd) {
+    case 0x00: display_wake(panel, now_us); break; // SwitchOnDisplay (ESP32 CLU driver)
     case 0x0a: { // PRINT_TEXT x y font text[16]
         char text[17];
         copy_str(text, sizeof text, args + 3, 16);

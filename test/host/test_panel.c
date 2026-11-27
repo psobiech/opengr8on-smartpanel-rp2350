@@ -156,6 +156,50 @@ int main(int argc, char **argv)
     bus(panel, "aa1304bd");              // poll of another panel: silent
     check_tx("VERSION_QUERY and foreign poll unanswered", "");
 
+    // ---- display sleep: ProximityTimeout (default 5000 ms) after the last touch. Display record as the
+    // ESP32 CLU driver decodes it: ext 0x80, byte 3 = 1 OnDisplayOn / 0 OnDisplayOff, all else 0 ----
+    // discovery above took seconds: the display fell asleep unpolled. Start from a fresh touch; that
+    // touch wakes it and queues OnProximityDetect, so drain it with a poll before the checks below.
+    panel_display_touch(panel, now);
+    uint64_t touch_us = now;
+    poll(panel, 0x12);
+    tx_reset();
+    poll(panel, 0x12);
+    idle_bus(panel, touch_us + 4990000 - now);
+    poll(panel, 0x12);
+    check_tx("display: nothing reported before ProximityTimeout", "aa0001ab aa0001ab ");
+    check("display: awake before ProximityTimeout", panel->display_on);
+    idle_bus(panel, 20000);
+    check("display: asleep after ProximityTimeout without a touch", !panel->display_on);
+    tx_reset();
+    poll(panel, 0x12);
+    poll(panel, 0x12);
+    check_tx("display: OnDisplayOff record once, then bare ACK", "aa000e0000000000000000000080000024 aa0001ab ");
+    check("display touch: wakes a sleeping display", panel_display_touch(panel, now));
+    check("display touch: no wake on an awake display", !panel_display_touch(panel, now));
+    tx_reset();
+    poll(panel, 0x12);
+    poll(panel, 0x12);
+    poll(panel, 0x12);
+    check_tx("display: a waking touch sends OnDisplayOn, then OnProximityDetect (ext 01), then ACK",
+             "aa000e0100000000000000000080000025 aa000e00000000000000000000010000a5 aa0001ab ");
+    idle_bus(panel, 5000000);
+    tx_reset();
+    poll(panel, 0x12);
+    check_tx("display: asleep again 5 s after the touch", "aa000e0000000000000000000080000024 ");
+    tx_reset();
+    frame(panel, 0x12, 0x31, (const uint8_t[22]){0x00}, 22); // SwitchOnDisplay -> TFBUS_CMD 0x00
+    poll(panel, 0x12);
+    poll(panel, 0x12);
+    check_tx("SwitchOnDisplay: ACK, then OnDisplayOn record, no proximity",
+             "aa0001ab aa000e0100000000000000000080000025 aa0001ab ");
+    frame(panel, 0x12, 0x31, (const uint8_t[22]){0x02, 0xe8, 0x03}, 22); // ProximityTimeout 1000 ms
+    idle_bus(panel, 1000000);
+    tx_reset();
+    poll(panel, 0x12);
+    check_tx("ProximityTimeout 1000 ms from the CLU: asleep after 1 s", "aa000e0000000000000000000080000024 ");
+    // the display stays asleep (and reported) for the tests below: panel_touch() does not wake it
+
     // ---- status: sensor frame (temperature in 0.1 C at bytes 7-8) on change, bare ACK otherwise ----
     panel_set_temp(panel, 23.20f);
     tx_reset();

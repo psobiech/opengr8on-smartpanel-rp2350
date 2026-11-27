@@ -81,7 +81,7 @@ typedef struct {
     int16_t reported_temperature_deci; // 0.1 C, last value sent in a state frame
     uint16_t temperature_period_ms; // PANELSENSTEMP Sensitivity (frame 0x16): one temperature report per period
     uint64_t last_temperature_report_us; // a temperature-only state frame went out
-    uint8_t pending_ext_flags;    // gesture flags for the next state frame's ext byte, sent once
+    uint8_t pending_ext_flags;    // gesture / proximity flags for the next state frame's ext byte, sent once
     // buttons
     bool slot_down[PANEL_SLOTS];
     uint8_t slot_button[PANEL_SLOTS]; // button index held by each pressed slot
@@ -98,7 +98,11 @@ typedef struct {
     bool buzzer_on;
     uint8_t buttons_led_mode;     // 0 off, 1 location LEDs on, 2 for active
     uint8_t page_control_mode;    // 0 command, 1 gesture/command
-    uint16_t proximity_timeout_ms; // stored only: no proximity sensor, the display stays on
+    uint16_t proximity_timeout_ms; // PANEL ProximityTimeout: the display sleeps this long after the last touch
+    // display sleep (the board blanks or dims it); OnDisplayOn / OnDisplayOff go to the CLU
+    bool display_on;
+    bool reported_display_on;     // display state as last sent in a display record
+    uint64_t display_activity_us; // last touch / SwitchOnDisplay
     uint8_t gesture_display_mode; // 0: gestures are not shown on the OLED
     char gesture_icon[4][17];     // PANEL GestureIcon* per panel_gesture_t (empty: the direction name)
     uint64_t gesture_shown_until_us; // OLED_GESTURE: back to the buttons at this time
@@ -134,6 +138,11 @@ void panel_touch_cancel(panel_t *panel, int slot, uint64_t now_us);
 // the OLED while GestureDisplayMode is on; left / right also flip the page in PageControlMode 1
 // (left = next page).
 void panel_gesture(panel_t *panel, panel_gesture_t gesture, uint64_t now_us);
+
+// Touch on the display (any finger, before the touch is mapped to a field): restarts the
+// ProximityTimeout countdown and wakes a sleeping display (OnDisplayOn, then OnProximityDetect).
+// Returns true if it woke the display.
+bool panel_display_touch(panel_t *panel, uint64_t now_us);
 
 void panel_set_temp(panel_t *panel, float celsius);
 

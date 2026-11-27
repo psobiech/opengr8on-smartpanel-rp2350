@@ -1,6 +1,7 @@
 # Prebuilt firmware for the Waveshare RP2350-Touch-LCD-4 (smartpanel.uf2, plus .elf/.bin), built
 # with the Pico SDK version the project is developed on (README, "Budowanie"), and the host tests
-# (test/host). Tag v*: GitHub release with the .uf2 image.
+# (test/host). Two variants: with screen blanking (PANEL_DISPLAY_BLANK=ON, the default) and without
+# it (-noblank: the sleeping display stays dimmed). Tag v*: GitHub release with both .uf2 images.
 name: Firmware
 
 on:
@@ -19,8 +20,13 @@ env:
 
 jobs:
   firmware:
-    name: Firmware (RP2350-Touch-LCD-4)
+    name: Firmware (RP2350-Touch-LCD-4, ${{ matrix.variant.label }})
     runs-on: ubuntu-26.04
+    strategy:
+      matrix:
+        variant:
+          - { name: opengr8on-smartpanel-rp2350, blank: "ON", label: "screen blanking" }
+          - { name: opengr8on-smartpanel-rp2350-noblank, blank: "OFF", label: "no screen blanking" }
     steps:
       - uses: actions/checkout@v7
         with:
@@ -48,13 +54,14 @@ jobs:
 
       - name: Build
         run: |
-          cmake -G Ninja -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DCMAKE_BUILD_TYPE=Release
+          cmake -G Ninja -B build -DPICO_SDK_PATH="$HOME/pico-sdk" -DCMAKE_BUILD_TYPE=Release \
+            -DPANEL_DISPLAY_BLANK=${{ matrix.variant.blank }}
           cmake --build build
 
       - name: Package
         run: |
           set -euo pipefail
-          out=dist/opengr8on-smartpanel-rp2350
+          out="dist/${{ matrix.variant.name }}"
           mkdir -p "$out"
           cp build/smartpanel.uf2 build/smartpanel.elf build/smartpanel.bin "$out/"
           git describe --tags --always --dirty > "$out/VERSION"
@@ -63,8 +70,8 @@ jobs:
       - name: Upload firmware
         uses: actions/upload-artifact@v7
         with:
-          name: opengr8on-smartpanel-rp2350
-          path: dist/opengr8on-smartpanel-rp2350
+          name: ${{ matrix.variant.name }}
+          path: dist/${{ matrix.variant.name }}
           if-no-files-found: error
 
   host-tests:
@@ -98,16 +105,21 @@ jobs:
     steps:
       - uses: actions/download-artifact@v8
         with:
-          name: opengr8on-smartpanel-rp2350
-          path: firmware
+          pattern: opengr8on-smartpanel-rp2350*
+          path: firmware # one directory per variant (artifact name)
 
+      # opengr8on-smartpanel-rp2350-<tag>.uf2 / .zip, and -<tag>-noblank for the variant without blanking
       - name: Assets
         run: |
           set -euo pipefail
           tag="${GITHUB_REF_NAME}"
           mkdir -p assets
-          cp firmware/smartpanel.uf2 "assets/opengr8on-smartpanel-rp2350-${tag}.uf2"
-          (cd firmware && zip -qr "../assets/opengr8on-smartpanel-rp2350-${tag}.zip" .)
+          for variant_dir in firmware/*/; do
+            variant="$(basename "$variant_dir")"
+            suffix="${variant#opengr8on-smartpanel-rp2350}"
+            cp "$variant_dir/smartpanel.uf2" "assets/opengr8on-smartpanel-rp2350-${tag}${suffix}.uf2"
+            (cd "$variant_dir" && zip -qr "$GITHUB_WORKSPACE/assets/opengr8on-smartpanel-rp2350-${tag}${suffix}.zip" .)
+          done
           ls -l assets
 
       - name: Publish

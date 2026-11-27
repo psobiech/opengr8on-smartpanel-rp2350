@@ -85,9 +85,12 @@ Brakuje / nie zostało rozpoznane:
   ShowButtons (`0x03`) — format ramek znany (sterownik CLU je wysyła), panel ich jeszcze nie rysuje.
   PrintFloat przychodzi jako zwykły PrintText (`0x0a`).
 - **Zbliżenie, wygaszanie ekranu i czujnik światła** — płytka nie ma czujnika zbliżeniowego ani
-  światła, więc panel nie wysyła flagi zbliżenia (`01`) ani rekordu ekranu (`80`: OnDisplayOn /
-  OnDisplayOff), a `ProximityTimeout` jest przyjmowany, ale ignorowany (ekran nie gaśnie). Gesty
-  to przesunięcia palcem po ekranie (prawdziwy panel rozpoznaje je bezdotykowo).
+  światła. Wygaszanie liczy `ProximityTimeout` od ostatniego dotyku (prawdziwy panel: od ostatniego
+  wykrycia zbliżenia); dotyk lub `SwitchOnDisplay` (TFBUS_CMD `0x00`) budzi ekran. Panel wysyła
+  rekord ekranu (`80`, bajt 3: `01` OnDisplayOn / `00` OnDisplayOff) w formacie, który dekoduje
+  sterownik CLU ESP32; dotyk budzący ekran wysyła potem jeszcze flagę zbliżenia (`01`,
+  OnProximityDetect), jak prawdziwy panel po wybudzeniu. Gesty to przesunięcia palcem
+  po ekranie (prawdziwy panel rozpoznaje je bezdotykowo).
 - **Mapowanie ustawień TFBUS_CMD** (`0x02` ProximityTimeout, `0x0c` BuzzerValue, `0x14`
   ButtonsLEDMode) wywnioskowane z kolejności wartości w zrzucie magistrali, niepotwierdzone.
   `0x15` PageControlMode potwierdzone zrzutem (`SetPageControlMode` → `31 15 nn`): w trybie
@@ -163,6 +166,20 @@ wygenerowania potrzeba Pillow i Noto Sans: `python3 tools/gen_font.py > src/font
 |---|---|---|
 | Numer seryjny | `0x0f05fxxx` z unikalnego ID pamięci flash | `cmake -B build -DPANEL_SN=0x0f05xxxx` |
 | Korekta temperatury | `-13` °C | `cmake -B build -DCMAKE_C_FLAGS="-DPANEL_TEMP_OFFSET=-8.0f"` |
+| Jasność podświetlenia | `70` % | `cmake -B build -DPANEL_DISPLAY_BRIGHTNESS=50` (do 100) |
+| Jasność przyciemnionego ekranu | `5` % | `cmake -B build -DPANEL_DISPLAY_DIM_BRIGHTNESS=10` (0..jasność podświetlenia) |
+| Uśpiony ekran | wygaszany po 10 s przyciemnienia | `cmake -B build -DPANEL_DISPLAY_BLANK=OFF` (tylko przyciemniony) |
+
+**Uśpienie ekranu** (ochrona LCD przed utrwaleniem obrazu): po `ProximityTimeout` (domyślnie 5 s,
+ustawiane z OM) bez dotyku ekran zasypia (CLU dostaje OnDisplayOff): podświetlenie w 1 s spada do
+`PANEL_DISPLAY_DIM_BRIGHTNESS` (domyślnie 5%), ekran jest dalej czytelny, a przyciski działają. Po kolejnych 10 s ekran jest wygaszany:
+podświetlenie i wyjście ST7701 (Display Off) są wyłączane, a dotyk, który go budzi, nie trafia do
+CLU (nie widać, co się dotyka). Z `PANEL_DISPLAY_BLANK=OFF` ekran zostaje przyciemniony. Dotyk
+budzi ekran od razu, do pełnej jasności (`PANEL_DISPLAY_BRIGHTNESS`).
+Obraz przesuwa się też o 1 piksel po obwodzie kwadratu ±2 px (najwyżej co 2 min, 16 pozycji), żeby
+ostre statyczne krawędzie (narożniki, kropki stanu i stron) nie utrwalały się w jednym miejscu —
+tylko gdy ekran jest przyciemniony lub wygaszony, nigdy przy pełnej jasności. Przesuwany jest tylko
+początek odczytu DMA, bez przerysowania; przy brzegu może być widoczny pasek czerni do 2 px.
 
 Wyliczane numery seryjne leżą w zakresie `0x0f05f000..0x0f05ffff`, z dala od zakresu, w którym
 widziano prawdziwe panele (`0x0f057bxx`).
