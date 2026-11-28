@@ -34,6 +34,7 @@ static uint8_t s_oled_frame[OLED_W * OLED_H / 8]; // core1: the OLED of the fram
 
 static void frame_started(void);
 static void core1_main(void);
+static uint32_t core1_frame(uint32_t frame_seen);
 static void compose_oled_rows(const line_table_t *table, uint32_t frame);
 static void build_line_table(line_table_t *table, int dx, int dy);
 
@@ -92,15 +93,24 @@ static void __not_in_flash_func(core1_main)(void)
 {
     uint32_t frame_seen = s_frame_count;
     for (;;) {
-        while (s_frame_count == frame_seen) {
-            __wfe(); // also while the scan-out is stopped (display blank)
-        }
-        frame_seen = s_frame_count;
-        uint32_t saved_interrupts = spin_lock_blocking(s_oled_lock);
-        memcpy(s_oled_frame, s_oled_shared, sizeof s_oled_frame);
-        spin_unlock(s_oled_lock, saved_interrupts);
-        compose_oled_rows(&s_line_tables[s_table_sending], frame_seen);
+        frame_seen = core1_frame(frame_seen);
     }
+}
+
+// One frame on core1: wait (WFE) for a frame start after frame_seen, take that frame's OLED
+// (under the lock: a later scanout_set_oled shows from the next frame), compose its rows.
+// Returns the frame composed.
+static uint32_t __not_in_flash_func(core1_frame)(uint32_t frame_seen)
+{
+    while (s_frame_count == frame_seen) {
+        __wfe(); // also while the scan-out is stopped (display blank)
+    }
+    frame_seen = s_frame_count;
+    uint32_t saved_interrupts = spin_lock_blocking(s_oled_lock);
+    memcpy(s_oled_frame, s_oled_shared, sizeof s_oled_frame);
+    spin_unlock(s_oled_lock, saved_interrupts);
+    compose_oled_rows(&s_line_tables[s_table_sending], frame_seen);
+    return frame_seen;
 }
 
 // Every OLED row of the frame into its ring line, each one after the DMA has finished with the

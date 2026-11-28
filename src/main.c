@@ -189,6 +189,17 @@ typedef struct {
 
 static finger_t s_fingers[FINGERS];
 
+// Main loop state: the touch controller, when each periodic step is due next, the UI view.
+typedef struct {
+    bsp_touch_interface_t *touch;
+    uint64_t next_temperature_us, next_touch_us, next_tap_us, next_render_us;
+    ui_view_t view;
+} main_loop_t;
+
+static main_loop_t s_main_loop;
+
+static bsp_touch_interface_t *boot(void);
+static void main_loop_step(main_loop_t *loop);
 static void set_cpu_clock(uint32_t mhz);
 static void buzzer_init(void);
 static uint32_t panel_sn(void);
@@ -221,6 +232,15 @@ static void buzzer_stop(void);
 static void on_log(const char *message, void *context);
 
 int main(void)
+{
+    s_main_loop.touch = boot();
+    for (;;) {
+        main_loop_step(&s_main_loop);
+    }
+}
+
+// Everything up to the main loop. Returns the touch controller.
+static bsp_touch_interface_t *boot(void)
 {
     rs485_release_bus(); // first: the display / touch / IMU init below takes ~1.3 s
     stdio_init_all();
@@ -276,72 +296,73 @@ int main(void)
            (unsigned long)s_panel.serial_number, (unsigned long)s_panel.serial_number);
     printf("OM.LUA: mm_%lu = OBJECT:new(2, 0x%08lx, 0x03, \"%08lx\")\n", (unsigned long)s_panel.serial_number,
            (unsigned long)s_panel.serial_number, (unsigned long)s_panel.serial_number);
+    return touch;
+}
 
-    static ui_view_t view;
-    uint64_t next_temperature = 0, next_touch = 0, next_tap = 0, next_render = 0;
+// One turn of the main loop: panel timing, display sleep, touch (100 Hz), tap (TAP_POLL_US),
+// temperature (1 s), buzzer, UI (<= 25 fps), icons, diagnostics; light sleep while blank.
+static void main_loop_step(main_loop_t *loop)
+{
+    uint64_t now = time_us_64();
+    LOCKED(panel_tick(&s_panel, now));
+    uint64_t step_start_us = now;
+    display_poll(now);
+    pixel_shift_poll(now);
+    loop_step_done("display", step_start_us);
 
-    for (;;) {
-        uint64_t now = time_us_64();
-        LOCKED(panel_tick(&s_panel, now));
-        uint64_t step_start_us = now;
-        display_poll(now);
-        pixel_shift_poll(now);
-        loop_step_done("display", step_start_us);
-
-        if (now >= next_touch) { // GT911 at 100 Hz
-            next_touch = now + 10000;
-            step_start_us = time_us_64();
-            touch->read();
-            now = time_us_64(); // after read(): the report stamp must not be newer than `now`
-            touch_poll(touch, now);
-            loop_step_done("touch", step_start_us);
-        }
-
-        if (s_have_tap && now >= next_tap) {
-            next_tap = now + TAP_POLL_US;
-            step_start_us = time_us_64();
-            tap_poll(now);
-            loop_step_done("tap", step_start_us);
-        }
-
-        if (now >= next_temperature) {
-            next_temperature = now + 1000000;
-            step_start_us = time_us_64();
-            float temperature = read_temp();
-            if (!isnan(temperature)) {
-                LOCKED(panel_set_temp(&s_panel, temperature));
-            }
-            loop_step_done("temperature", step_start_us);
-        }
-
-        uint16_t beep_frequency_hz, beep_duration_ms, beep_volume;
-        bool beep;
-        LOCKED(beep = panel_take_beep(&s_panel, &beep_frequency_hz, &beep_duration_ms, &beep_volume));
-        if (beep) {
-            buzzer_beep(beep_frequency_hz, beep_duration_ms, beep_volume);
-        }
-        buzzer_poll(now);
-
-        if (now >= next_render) { // <= 25 fps; LED flash phases need periodic checks
-            next_render = now + 30000;
-            step_start_us = time_us_64();
-            snapshot(&view, now);
-            ui_render(&view); // redraws only regions that changed
-            loop_step_done("render", step_start_us);
-        }
+    if (now >= loop->next_touch_us) { // GT911 at 100 Hz
+        loop->next_touch_us = now + 10000;
         step_start_us = time_us_64();
-        icons_poll();
-        loop_step_done("icons", step_start_us);
-        step_start_us = time_us_64();
-        flush_log();
-        loop_step_done("log", step_start_us);
-        rs485_stats(now);
-        scanout_stats(now);
-        loop_stats(now);
+        loop->touch->read();
+        now = time_us_64(); // after read(): the report stamp must not be newer than `now`
+        touch_poll(loop->touch, now);
+        loop_step_done("touch", step_start_us);
+    }
 
-        if (s_display_blank) { // light sleep: any interrupt or the timeout wakes the core
-            best_effort_wfe_or_timeout(make_timeout_time_us(BLANK_WAKE_INTERVAL_US));
+    if (s_have_tap && now >= loop->next_tap_us) {
+        loop->next_tap_us = now + TAP_POLL_US;
+        step_start_us = time_us_64();
+        tap_poll(now);
+        loop_step_done("tap", step_start_us);
+    }
+
+    if (now >= loop->next_temperature_us) {
+        loop->next_temperature_us = now + 1000000;
+        step_start_us = time_us_64();
+        float temperature = read_temp();
+        if (!isnan(temperature)) {
+            LOCKED(panel_set_temp(&s_panel, temperature));
         }
+        loop_step_done("temperature", step_start_us);
+    }
+
+    uint16_t beep_frequency_hz, beep_duration_ms, beep_volume;
+    bool beep;
+    LOCKED(beep = panel_take_beep(&s_panel, &beep_frequency_hz, &beep_duration_ms, &beep_volume));
+    if (beep) {
+        buzzer_beep(beep_frequency_hz, beep_duration_ms, beep_volume);
+    }
+    buzzer_poll(now);
+
+    if (now >= loop->next_render_us) { // <= 25 fps; LED flash phases need periodic checks
+        loop->next_render_us = now + 30000;
+        step_start_us = time_us_64();
+        snapshot(&loop->view, now);
+        ui_render(&loop->view); // redraws only regions that changed
+        loop_step_done("render", step_start_us);
+    }
+    step_start_us = time_us_64();
+    icons_poll();
+    loop_step_done("icons", step_start_us);
+    step_start_us = time_us_64();
+    flush_log();
+    loop_step_done("log", step_start_us);
+    rs485_stats(now);
+    scanout_stats(now);
+    loop_stats(now);
+
+    if (s_display_blank) { // light sleep: any interrupt or the timeout wakes the core
+        best_effort_wfe_or_timeout(make_timeout_time_us(BLANK_WAKE_INTERVAL_US));
     }
 }
 

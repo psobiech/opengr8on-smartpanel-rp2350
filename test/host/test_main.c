@@ -6,13 +6,12 @@
 // median, the buzzer, RS485 RX / TX turnaround, the log ring, the UI snapshot and the boot + main
 // loop.
 #include <math.h>
-#include <setjmp.h>
 #include <stdarg.h>
 #include <stdio.h>
 #include <stdlib.h>
 #include <string.h>
 
-#define main firmware_main
+#define main firmware_main // the endless loop itself; the tests call boot() and main_loop_step()
 #include "../../src/main.c"
 #undef main
 
@@ -47,8 +46,9 @@ static const uint8_t *g_scanout_oled;
 // icons
 static png_icon_t g_bulb_icon;
 static char g_icons_found[256];
-static int g_main_loop_iterations_left;
-static jmp_buf g_main_loop_exit;
+static uint64_t g_icons_poll_advance_us = 10000; // time one main loop turn takes (icons_poll)
+// main loop schedule: calls per periodic step
+static int g_touch_reads, g_tap_polls, g_temperature_reads, g_renders, g_light_sleeps;
 // buzzer PWM
 static uint16_t g_buzzer_level;
 static float g_buzzer_clock_divider;
@@ -78,6 +78,7 @@ static bsp_touch_interface_t g_touch_interface;
 static void test_read_temp_before_any_sample(void);
 static void test_boot_and_main_loop(void);
 static void test_boot_without_imu(void);
+static void test_main_loop_schedule(void);
 static void test_touch_tap(void);
 static void test_touch_hold(void);
 static void test_touch_drag(void);
@@ -109,6 +110,7 @@ static void uart_receive(const char *hex, uint32_t error_bits);
 static void record_call(const char *format, ...);
 static void fake_display_set_brightness(uint8_t brightness);
 static void fake_touch_noop(void);
+static void fake_touch_read(void);
 static bool fake_touch_get_data(bsp_touch_data_t *data);
 
 int main(void)
@@ -116,6 +118,7 @@ int main(void)
     test_read_temp_before_any_sample();
     test_boot_and_main_loop();
     test_boot_without_imu();
+    test_main_loop_schedule();
     test_touch_tap();
     test_touch_hold();
     test_touch_drag();
@@ -156,9 +159,9 @@ static void test_boot_and_main_loop(void)
     g_imu_present = 1;
     g_imu_temperature = 25.0f;
     g_calls[0] = 0;
-    g_main_loop_iterations_left = 4;
-    if (!setjmp(g_main_loop_exit)) {
-        firmware_main();
+    s_main_loop.touch = boot();
+    for (int turn = 0; turn < 4; turn++) {
+        main_loop_step(&s_main_loop);
     }
     free_framebuffer();
     static const char k_boot_start[] = "gpio_init 8; gpio_put 8,1; gpio_set_dir 8,1; stdio_init_all; ";
@@ -187,17 +190,50 @@ static void test_boot_and_main_loop(void)
                                                                   s_panel.temperature_centi == 1820);
     check("main loop: the OLED handed to the scan-out", g_scanout_oled == s_panel.oled_shown);
     check("main loop: display awake at full brightness", !s_display_blank && g_brightness_percent == 255);
+    check("boot: main loop state from the start (touch controller, nothing due yet)",
+          s_main_loop.touch == &g_touch_interface);
+}
+
+// One second of main loop turns of 1 ms each: every periodic step at its own rate.
+static void test_main_loop_schedule(void)
+{
+    s_have_tap = true;
+    g_icons_poll_advance_us = 1000;
+    g_now_us = 100000000;
+    s_main_loop.next_touch_us = s_main_loop.next_tap_us = s_main_loop.next_temperature_us = 0;
+    s_main_loop.next_render_us = 0;
+    g_touch_reads = g_tap_polls = g_temperature_reads = g_renders = g_light_sleeps = 0;
+    for (int turn = 0; turn < 1000; turn++) {
+        main_loop_step(&s_main_loop);
+    }
+    check("main loop: GT911 read at 100 Hz", g_touch_reads == 100);
+    check("main loop: tap polled every TAP_POLL_US", g_tap_polls == 50);
+    check("main loop: temperature once a second", g_temperature_reads == 1);
+    check("main loop: UI at most every 30 ms", g_renders == 34);
+    check("main loop: no light sleep while the display is on", g_light_sleeps == 0);
+    s_display_blank = true;
+    s_panel.display_on = false;
+    s_display_asleep = true;
+    s_asleep_since_us = 0; // long asleep: stays blank
+    s_scanout_stopped = true;
+    uint64_t before_us = g_now_us;
+    main_loop_step(&s_main_loop);
+    check("main loop while blank: light sleep up to BLANK_WAKE_INTERVAL_US",
+          g_light_sleeps == 1 && g_now_us == before_us + 1000 + BLANK_WAKE_INTERVAL_US);
+    s_display_blank = false;
+    s_scanout_stopped = false;
+    s_panel.display_on = true;
+    s_display_asleep = false;
+    g_icons_poll_advance_us = 10000;
+    free_framebuffer();
 }
 
 static void test_boot_without_imu(void)
 {
     g_imu_present = 0;
     g_calls[0] = 0;
-    g_main_loop_iterations_left = 1;
-    if (!setjmp(g_main_loop_exit)) {
-        firmware_main();
-    }
-    free_framebuffer();
+    s_main_loop.touch = boot();
+    main_loop_step(&s_main_loop); // its framebuffer is freed after test_main_loop_schedule
     check("boot without IMU: ADC temperature sensor enabled",
           strstr(g_calls, "adc_init; adc_set_temp_sensor_enabled 1; ") != NULL && !s_have_imu);
     g_adc_value = 876; // 0.706 V = 27 C
@@ -690,7 +726,7 @@ static void check_text(const char *name, const char *actual, const char *expecte
     }
 }
 
-// The framebuffer firmware_main allocated (it never returns on the board, so it never frees it).
+// The framebuffer boot() allocated (the board never frees it).
 static void free_framebuffer(void)
 {
     free((uint16_t *)ui_row(0) - FRAMEBUFFER_MARGIN);
@@ -798,6 +834,11 @@ static void fake_touch_noop(void)
 {
 }
 
+static void fake_touch_read(void)
+{
+    g_touch_reads++;
+}
+
 static bool fake_touch_get_data(bsp_touch_data_t *data)
 {
     if (!g_touch_report.points) {
@@ -855,6 +896,7 @@ absolute_time_t make_timeout_time_us(uint64_t delay_us)
 
 bool best_effort_wfe_or_timeout(absolute_time_t timeout_timestamp)
 {
+    g_light_sleeps++;
     g_now_us = timeout_timestamp._private_us_since_boot;
     return true;
 }
@@ -1088,7 +1130,7 @@ bool bsp_touch_new_gt911(bsp_touch_interface_t **interface, bsp_touch_info_t *in
 {
     record_call("bsp_touch_new_gt911 %ux%u", info->width, info->height);
     g_touch_interface.init = fake_touch_noop;
-    g_touch_interface.read = fake_touch_noop;
+    g_touch_interface.read = fake_touch_read;
     g_touch_interface.get_data = fake_touch_get_data;
     *interface = &g_touch_interface;
     return true;
@@ -1120,6 +1162,7 @@ bool bsp_qmi8658_enable_tap(float peak_threshold_g2, float quiet_threshold_g2)
 
 bool bsp_qmi8658_tap_detected(void)
 {
+    g_tap_polls++;
     bool tap = g_tap_pending;
     g_tap_pending = false;
     return tap;
@@ -1127,6 +1170,7 @@ bool bsp_qmi8658_tap_detected(void)
 
 float bsp_qmi8658_readTemp(void)
 {
+    g_temperature_reads++;
     return g_imu_temperature;
 }
 
@@ -1148,6 +1192,7 @@ void scanout_set_enabled(bool enabled)
 
 void scanout_set_oled(const uint8_t *oled)
 {
+    g_renders++; // snapshot hands the OLED over once per UI render
     g_scanout_oled = oled;
 }
 
@@ -1178,11 +1223,8 @@ const png_icon_t *icons_find(const char *name)
     return strcmp(name, "bulb") == 0 ? &g_bulb_icon : NULL;
 }
 
-// Called once per main loop iteration: the test leaves the (endless) loop from here.
+// Called once per main loop turn: the time the turn takes.
 void icons_poll(void)
 {
-    g_now_us += 10000;
-    if (--g_main_loop_iterations_left <= 0) {
-        longjmp(g_main_loop_exit, 1);
-    }
+    g_now_us += g_icons_poll_advance_us;
 }

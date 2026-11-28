@@ -19,11 +19,14 @@ static bool g_dma_advances; // the DMA starts one more row every 3rd pio_rgb_lin
 static int g_dma_polls;
 static void (*g_core1_entry)(void);
 static spin_lock_t g_spin_lock;
+static int g_wfe_calls;
+static int g_frames_started_in_wfe; // __wfe: the DMA starts a frame at this call (0: never)
 
 static void test_line_tables(void);
 static void test_table_swap(void);
 static void test_compose_oled_rows(void);
 static void test_late_and_stopped(void);
+static void test_core1_frame(void);
 static void test_hit(void);
 static void test_render_regions(void);
 static void check(const char *name, int condition);
@@ -40,6 +43,7 @@ int main(void)
     test_table_swap();
     test_compose_oled_rows();
     test_late_and_stopped();
+    test_core1_frame();
     test_hit();
     test_render_regions();
     free(g_framebuffer_allocation);
@@ -165,6 +169,39 @@ static void test_late_and_stopped(void)
     compose_oled_rows(&s_line_tables[0], s_frame_count - 1);
     check("a newer frame started: core1 gives up the old one", s_late_lines == 0);
     check("late lines reported", scanout_late_lines() == 0);
+}
+
+static void test_core1_frame(void)
+{
+    static uint8_t oled[OLED_W * OLED_H / 8];
+    memset(oled, 0xff, sizeof oled);
+    scanout_set_oled(oled);
+    g_dma_advances = true;
+    g_lines_started = 0;
+    g_wfe_calls = 0;
+    uint32_t frame = core1_frame(s_frame_count - 1);
+    check("core1: a frame already started is composed without waiting", g_wfe_calls == 0 && frame == s_frame_count);
+    check("core1: the frame's OLED copied under the lock", memcmp(s_oled_frame, oled, sizeof oled) == 0 &&
+                                                              g_spin_lock == 0);
+
+    s_table_queued = 1; // a pixel shift queued meanwhile
+    s_line_tables[1] = s_line_tables[0];
+    g_frames_started_in_wfe = 3;
+    g_wfe_calls = 0;
+    g_lines_started = 0;
+    uint32_t next_frame = core1_frame(frame);
+    check("core1: waits in WFE until the next frame starts", g_wfe_calls == 3 && next_frame == frame + 1);
+    check("core1: composes from the table that frame runs from", s_table_sending == 1);
+
+    memset(oled, 0x00, sizeof oled);
+    scanout_set_oled(oled); // core0 changes the OLED while the frame is sent
+    check("core1: a later OLED change does not touch the frame being sent", s_oled_frame[0] == 0xff);
+    g_frames_started_in_wfe = 1;
+    g_lines_started = 0;
+    core1_frame(next_frame);
+    check("core1: the next frame shows it", s_oled_frame[0] == 0x00);
+    g_frames_started_in_wfe = 0;
+    s_table_sending = s_table_queued = 0;
 }
 
 static void test_hit(void)
@@ -347,8 +384,12 @@ void __sev(void)
 {
 }
 
+// core1 waits here for a frame start; the fake DMA starts one at the g_frames_started_in_wfe-th call.
 void __wfe(void)
 {
+    if (++g_wfe_calls == g_frames_started_in_wfe) {
+        frame_started();
+    }
 }
 
 void pio_rgb_set_scanout_enabled(bool enabled)
