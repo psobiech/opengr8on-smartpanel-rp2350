@@ -49,7 +49,7 @@
 #define PANEL_SN 0
 #endif
 #ifndef PANEL_TEMP_OFFSET
-#define PANEL_TEMP_OFFSET -6.3f // calibration, added to the measured temperature (board self-heating)
+#define PANEL_TEMP_OFFSET -6.8f // calibration, added to the measured temperature (board self-heating)
 #endif
 // Display sleep (see display_poll). CMake options: PANEL_DISPLAY_BRIGHTNESS = backlight while awake
 // (percent, limits LED aging and heat); PANEL_DISPLAY_DIM_BRIGHTNESS = backlight while dimmed
