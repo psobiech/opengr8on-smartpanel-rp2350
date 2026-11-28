@@ -568,9 +568,16 @@ bool bsp_qmi8658_enable_tap(float peak_threshold_g2, float quiet_threshold_g2)
 	bsp_qmi8658_reg_write_byte(QMI8658Register_Cal4_H, &data);
 	configured = configured && bsp_qmi8658_ctrl9_command(QMI8658_CTRL9_CMD_CONFIGURE_TAP);
 
-	bsp_qmi8658_reg_read(QMI8658Register_Ctrl1, &data, 1);
-	data |= QMI8658_CTRL1_INT1_ENABLE;
-	bsp_qmi8658_reg_write_byte(QMI8658Register_Ctrl1, &data);
+	// opengr8on: CTRL1 is read-modify-write; a failed read must not write the leftover byte over it
+	if (bsp_qmi8658_reg_read(QMI8658Register_Ctrl1, &data, 1))
+	{
+		data |= QMI8658_CTRL1_INT1_ENABLE;
+		bsp_qmi8658_reg_write_byte(QMI8658Register_Ctrl1, &data);
+	}
+	else
+	{
+		configured = false;
+	}
 	data = QMI8658_CTRL8_HANDSHAKE_STATUS_INT | QMI8658_CTRL8_ACTIVITY_INT1 | (configured ? QMI8658_CTRL8_TAP_ENABLE : 0);
 	bsp_qmi8658_reg_write_byte(QMI8658_REG_CTRL8, &data);
 	data = QMI8658_CTRL7_ACC_ENABLE;

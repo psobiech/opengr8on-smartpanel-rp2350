@@ -41,7 +41,7 @@ bool clock_configure(enum clock_index clock, uint32_t source, uint32_t auxiliary
 uint32_t clock_get_hz(enum clock_index clock);
 
 // hardware/gpio.h
-enum gpio_function { GPIO_FUNC_UART = 2, GPIO_FUNC_PWM = 4 };
+enum gpio_function { GPIO_FUNC_UART = 2, GPIO_FUNC_I2C = 3, GPIO_FUNC_PWM = 4 };
 #define GPIO_OUT 1
 void gpio_init(uint gpio);
 void gpio_put(uint gpio, bool value);
@@ -97,6 +97,19 @@ uint16_t adc_read(void);
 // hardware/i2c.h
 typedef struct i2c_inst i2c_inst_t;
 extern i2c_inst_t *const i2c1;
+uint i2c_init(i2c_inst_t *i2c, uint baudrate);
+int i2c_write_timeout_us(i2c_inst_t *i2c, uint8_t address, const uint8_t *source, size_t length, bool nostop,
+                         uint timeout_us);
+int i2c_read_timeout_us(i2c_inst_t *i2c, uint8_t address, uint8_t *destination, size_t length, bool nostop,
+                        uint timeout_us);
+
+// hardware/gpio.h (inputs, interrupts)
+#define GPIO_IN 0
+enum gpio_irq_level { GPIO_IRQ_LEVEL_LOW = 1, GPIO_IRQ_LEVEL_HIGH = 2, GPIO_IRQ_EDGE_FALL = 4, GPIO_IRQ_EDGE_RISE = 8 };
+typedef void (*gpio_irq_callback_t)(uint gpio, uint32_t event_mask);
+void gpio_pull_up(uint gpio);
+bool gpio_get(uint gpio);
+void gpio_set_irq_enabled_with_callback(uint gpio, uint32_t event_mask, bool enabled, gpio_irq_callback_t callback);
 
 // pico/unique_id.h
 #define PICO_UNIQUE_BOARD_ID_SIZE_BYTES 8

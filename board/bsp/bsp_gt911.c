@@ -77,7 +77,7 @@ static bool bsp_gt911_get_touch_data(bsp_touch_data_t *data)
             data->coords[i].y = g_touch_info->height - 1 - g_touch_info->data.coords[i].y;
             break;
         case 3:
-            data->coords[i].x = g_touch_info->width - g_touch_info->data.coords[i].y;
+            data->coords[i].x = g_touch_info->width - 1 - g_touch_info->data.coords[i].y; // opengr8on: was width - y (x = width for y = 0)
             data->coords[i].y = g_touch_info->data.coords[i].x;
             break;
         default:
