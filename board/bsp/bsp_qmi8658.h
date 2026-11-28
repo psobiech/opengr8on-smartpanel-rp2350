@@ -510,5 +510,8 @@ unsigned char bsp_qmi8658_readStatus1(void);
 float bsp_qmi8658_readTemp(void);
 void bsp_qmi8658_enableWakeOnMotion(void);
 void bsp_qmi8658_disableWakeOnMotion(void);
+// opengr8on: tap detection (bsp_qmi8658.c)
+bool bsp_qmi8658_enable_tap(float peak_threshold_g2, float quiet_threshold_g2);
+bool bsp_qmi8658_tap_detected(void);
 
 #endif

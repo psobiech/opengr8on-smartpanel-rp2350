@@ -30,9 +30,14 @@ set(PANEL_SN "0" CACHE STRING "Serial number (0 = derive 0x0f05fxxx from the fla
 set(PANEL_DISPLAY_BRIGHTNESS "70" CACHE STRING "Backlight while the display is awake, percent (up to 100)")
 set(PANEL_DISPLAY_DIM_BRIGHTNESS "5" CACHE STRING "Backlight while the display is dimmed, percent (0..PANEL_DISPLAY_BRIGHTNESS)")
 option(PANEL_DISPLAY_BLANK "Blank the display 10 s after it starts dimming (ProximityTimeout without a touch); OFF: stay dimmed" ON)
+option(PANEL_TAP_WAKE "Wake the display on a knock on the panel (QMI8658 tap detection)" ON)
+set(PANEL_TAP_PEAK_G2 "0.5" CACHE STRING "Tap: squared acceleration a knock must exceed, g^2 (lower = more sensitive)")
+set(PANEL_TAP_QUIET_G2 "0.2" CACHE STRING "Tap: squared acceleration the panel must settle below after the peak, g^2 (below PANEL_TAP_PEAK_G2)")
 target_compile_definitions(smartpanel PRIVATE PANEL_SN=${PANEL_SN} PANEL_DISPLAY_BRIGHTNESS=${PANEL_DISPLAY_BRIGHTNESS}
                            PANEL_DISPLAY_DIM_BRIGHTNESS=${PANEL_DISPLAY_DIM_BRIGHTNESS}
-                           PANEL_DISPLAY_BLANK=$<BOOL:${PANEL_DISPLAY_BLANK}> PICO_EMBED_XIP_SETUP=1)
+                           PANEL_DISPLAY_BLANK=$<BOOL:${PANEL_DISPLAY_BLANK}> PANEL_TAP_WAKE=$<BOOL:${PANEL_TAP_WAKE}>
+                           PANEL_TAP_PEAK_G2=${PANEL_TAP_PEAK_G2}f PANEL_TAP_QUIET_G2=${PANEL_TAP_QUIET_G2}f
+                           PICO_EMBED_XIP_SETUP=1)
 target_link_libraries(smartpanel pico_stdlib pico_unique_id hardware_uart hardware_pwm hardware_adc
                       hardware_irq hardware_sync bsp m)
 pico_enable_stdio_usb(smartpanel 1)

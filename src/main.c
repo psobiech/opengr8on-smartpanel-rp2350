@@ -3,9 +3,10 @@
 //
 // The TFBUS module logic lives in core/panel_core.c (host-tested). This file is the board glue:
 //   UART1 RX IRQ -> panel_rx() (replies go out from a timer 800 us after the request: bus turnaround),
-//   main loop     -> touch, panel_tick(), display sleep, pixel shift, buzzer, temperature, rendering
+//   main loop     -> touch, IMU tap, panel_tick(), display sleep, pixel shift, buzzer, temperature, rendering
 //                    of the replica UI; while the display is blank the core sleeps (WFE) between
 //                    interrupts (UART RX, GT911 INT, timers), at least every BLANK_WAKE_INTERVAL_US.
+//   QMI8658 tap engine -> a knock on the panel wakes the display like a touch (see tap_poll).
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -48,7 +49,7 @@
 #define PANEL_SN 0
 #endif
 #ifndef PANEL_TEMP_OFFSET
-#define PANEL_TEMP_OFFSET -13.0f // calibration, added to the measured temperature (board self-heating)
+#define PANEL_TEMP_OFFSET -6.3f // calibration, added to the measured temperature (board self-heating)
 #endif
 // Display sleep (see display_poll). CMake options: PANEL_DISPLAY_BRIGHTNESS = backlight while awake
 // (percent, limits LED aging and heat); PANEL_DISPLAY_DIM_BRIGHTNESS = backlight while dimmed
@@ -67,6 +68,20 @@
 #define DISPLAY_BLANK_AFTER_US 10000000 // dimmed -> blank, counted from the start of the fade
 #define ST7701_SLEEP_US        120000   // ST7701: Sleep In -> scan-out stop / Sleep Out, Sleep Out -> Display On
 #define BLANK_WAKE_INTERVAL_US 1000     // main loop wake-up while blank: panel_tick() timing (PANEL_GAP_US)
+// Tap wake (see tap_poll). CMake options: PANEL_TAP_WAKE 0 = off; PANEL_TAP_PEAK_G2 / PANEL_TAP_QUIET_G2 =
+// QMI8658 tap thresholds (squared acceleration, g^2): the peak a knock must exceed, and the level the
+// panel must settle below within 100 ms after it (0 < quiet < peak < 63; lower = more sensitive, more
+// false wakes).
+#ifndef PANEL_TAP_WAKE
+#define PANEL_TAP_WAKE 1
+#endif
+#ifndef PANEL_TAP_PEAK_G2
+#define PANEL_TAP_PEAK_G2 0.5f
+#endif
+#ifndef PANEL_TAP_QUIET_G2
+#define PANEL_TAP_QUIET_G2 0.2f
+#endif
+#define TAP_POLL_US 20000 // QMI8658 STATUS1 read (I2C, shared with the GT911)
 _Static_assert(PANEL_DISPLAY_DIM_BRIGHTNESS >= 0 && PANEL_DISPLAY_DIM_BRIGHTNESS <= PANEL_DISPLAY_BRIGHTNESS &&
                    PANEL_DISPLAY_BRIGHTNESS <= 100,
                "0 <= PANEL_DISPLAY_DIM_BRIGHTNESS <= PANEL_DISPLAY_BRIGHTNESS <= 100 (percent)");
@@ -104,6 +119,7 @@ static uint64_t s_beep_end_us;
 
 // Temperature: QMI8658 die sensor (fallback: RP2350 internal sensor)
 static bool s_have_imu;
+static bool s_have_tap; // QMI8658 tap engine configured (PANEL_TAP_WAKE)
 
 // Display sleep (see display_poll)
 static bsp_display_interface_t *s_display;
@@ -113,7 +129,7 @@ static uint64_t s_asleep_since_us;
 static bool s_display_blank;      // backlight off, ST7701 Display Off + Sleep In
 static uint64_t s_blank_since_us; // ST7701 Sleep In sent
 static bool s_scanout_stopped;    // RGB scan-out (PIO + DMA) stopped while blank
-static bool s_wake_touch;         // the touch that woke a blank display: not passed to the panel
+static bool s_wake_touch;         // the touch (or the tap) that woke a blank display: not passed to the panel
 static uint64_t s_last_touch_us;
 
 // Pixel shift (see pixel_shift_poll): the framebuffer has FRAMEBUFFER_MARGIN pixels of black
@@ -164,6 +180,7 @@ static void rs485_release_bus(void);
 static void rs485_init(void);
 static void touch_poll(bsp_touch_interface_t *touch, uint64_t now);
 static bool display_touch_filter(bool touched, uint64_t now);
+static void tap_poll(uint64_t now);
 static void display_poll(uint64_t now);
 static void display_set_blank(bool blank);
 static void backlight_set(uint8_t percent);
@@ -223,6 +240,12 @@ int main(void)
         adc_init();
         adc_set_temp_sensor_enabled(true);
     }
+    if (s_have_imu && PANEL_TAP_WAKE) {
+        s_have_tap = bsp_qmi8658_enable_tap(PANEL_TAP_PEAK_G2, PANEL_TAP_QUIET_G2);
+        printf("[tap] wake on tap: %s (peak %.2f g^2, quiet %.2f g^2)\n",
+               s_have_tap ? "on" : "off, the IMU did not accept the tap configuration", (double)PANEL_TAP_PEAK_G2,
+               (double)PANEL_TAP_QUIET_G2);
+    }
     buzzer_init();
 
     s_panel.transmit = on_tx;
@@ -236,7 +259,7 @@ int main(void)
 
     ui_init(s_framebuffer);
     static ui_view_t view;
-    uint64_t next_temperature = 0, next_touch = 0, next_render = 0;
+    uint64_t next_temperature = 0, next_touch = 0, next_tap = 0, next_render = 0;
 
     for (;;) {
         uint64_t now = time_us_64();
@@ -249,6 +272,11 @@ int main(void)
             touch->read();
             now = time_us_64(); // after read(): the report stamp must not be newer than `now`
             touch_poll(touch, now);
+        }
+
+        if (s_have_tap && now >= next_tap) {
+            next_tap = now + TAP_POLL_US;
+            tap_poll(now);
         }
 
         if (now >= next_temperature) {
@@ -452,6 +480,25 @@ static bool display_touch_filter(bool touched, uint64_t now)
         s_wake_touch = false;
     }
     return s_wake_touch;
+}
+
+// Knock on the panel (QMI8658 tap engine): same as a touch, it restarts the countdown and wakes the
+// display (the board's stand-in for the real panel's proximity sensor). A tap on the glass of a
+// blank display usually comes with a touch: the tap may be seen first, so it starts the wake-touch
+// swallowing too (display_touch_filter keeps it while a finger stays on, after the ~ST7701_SLEEP_US
+// unblank).
+static void tap_poll(uint64_t now)
+{
+    if (!bsp_qmi8658_tap_detected()) {
+        return;
+    }
+    bool woke;
+    LOCKED(woke = panel_display_touch(&s_panel, now));
+    if (woke && s_display_blank) {
+        s_wake_touch = true;
+        s_last_touch_us = now;
+    }
+    printf("[tap]%s\n", woke ? " display woken" : "");
 }
 
 static void display_poll(uint64_t now)

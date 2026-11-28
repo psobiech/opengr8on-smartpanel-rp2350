@@ -139,8 +139,9 @@ void panel_touch_cancel(panel_t *panel, int slot, uint64_t now_us);
 // (left = next page).
 void panel_gesture(panel_t *panel, panel_gesture_t gesture, uint64_t now_us);
 
-// Touch on the display (any finger, before the touch is mapped to a field): restarts the
-// ProximityTimeout countdown and wakes a sleeping display (OnDisplayOn, then OnProximityDetect).
+// Touch on the display (any finger, before the touch is mapped to a field) or a knock on the panel
+// (IMU tap): restarts the ProximityTimeout countdown and wakes a sleeping display (OnDisplayOn,
+// then OnProximityDetect).
 // Returns true if it woke the display.
 bool panel_display_touch(panel_t *panel, uint64_t now_us);
 

@@ -85,10 +85,11 @@ Brakuje / nie zostało rozpoznane:
   ShowButtons (`0x03`) — format ramek znany (sterownik CLU je wysyła), panel ich jeszcze nie rysuje.
   PrintFloat przychodzi jako zwykły PrintText (`0x0a`).
 - **Zbliżenie, wygaszanie ekranu i czujnik światła** — płytka nie ma czujnika zbliżeniowego ani
-  światła. Wygaszanie liczy `ProximityTimeout` od ostatniego dotyku (prawdziwy panel: od ostatniego
-  wykrycia zbliżenia); dotyk lub `SwitchOnDisplay` (TFBUS_CMD `0x00`) budzi ekran. Panel wysyła
+  światła. Wygaszanie liczy `ProximityTimeout` od ostatniego dotyku lub stuknięcia (prawdziwy panel:
+  od ostatniego wykrycia zbliżenia); dotyk, stuknięcie w panel (IMU) lub `SwitchOnDisplay` (TFBUS_CMD
+  `0x00`) budzi ekran. Panel wysyła
   rekord ekranu (`80`, bajt 3: `01` OnDisplayOn / `00` OnDisplayOff) w formacie, który dekoduje
-  sterownik CLU ESP32; dotyk budzący ekran wysyła potem jeszcze flagę zbliżenia (`01`,
+  sterownik CLU ESP32; dotyk lub stuknięcie budzące ekran wysyła potem jeszcze flagę zbliżenia (`01`,
   OnProximityDetect), jak prawdziwy panel po wybudzeniu. Gesty to przesunięcia palcem
   po ekranie (prawdziwy panel rozpoznaje je bezdotykowo).
 - **Mapowanie ustawień TFBUS_CMD** (`0x02` ProximityTimeout, `0x0c` BuzzerValue, `0x14`
@@ -171,6 +172,8 @@ wygenerowania potrzeba Pillow i Noto Sans: `python3 tools/gen_font.py > src/font
 | Jasność podświetlenia | `70` % | `cmake -B build -DPANEL_DISPLAY_BRIGHTNESS=50` (do 100) |
 | Jasność przyciemnionego ekranu | `5` % | `cmake -B build -DPANEL_DISPLAY_DIM_BRIGHTNESS=10` (0..jasność podświetlenia) |
 | Uśpiony ekran | wygaszany po 10 s przyciemnienia | `cmake -B build -DPANEL_DISPLAY_BLANK=OFF` (tylko przyciemniony) |
+| Budzenie stuknięciem | włączone | `cmake -B build -DPANEL_TAP_WAKE=OFF` |
+| Czułość stuknięcia | szczyt `0.5` g², cisza `0.2` g² | `cmake -B build -DPANEL_TAP_PEAK_G2=0.3 -DPANEL_TAP_QUIET_G2=0.1` (cisza < szczyt) |
 
 **Uśpienie ekranu** (ochrona LCD przed utrwaleniem obrazu): po `ProximityTimeout` (domyślnie 5 s,
 ustawiane z OM) bez dotyku ekran zasypia (CLU dostaje OnDisplayOff): podświetlenie w 1 s spada do
@@ -181,6 +184,16 @@ jest wysyłanie obrazu (PIO + DMA), a pętla główna śpi (WFE) między przerwa
 obsługiwany z przerwania UART, a GT911 budzi ją przerwaniem INT. Wybudzenie z wygaszenia trwa
 ~120 ms (Sleep Out). Z `PANEL_DISPLAY_BLANK=OFF` ekran zostaje przyciemniony. Dotyk
 budzi ekran od razu, do pełnej jasności (`PANEL_DISPLAY_BRIGHTNESS`).
+
+**Budzenie stuknięciem**: stuknięcie w szybkę lub obudowę działa jak dotyk — budzi ekran i liczy
+`ProximityTimeout` od nowa (zamiast czujnika zbliżenia prawdziwego panelu). Wykrywa je układ
+stuknięć w IMU QMI8658 (akcelerometr 500 Hz, ±8 g; żyroskop wyłączony): szczyt powyżej
+`PANEL_TAP_PEAK_G2`, a potem w ciągu 100 ms spokój poniżej `PANEL_TAP_QUIET_G2`; podwójne
+stuknięcie liczy się jak pojedyncze. Pętla główna
+czyta stan co 20 ms. Dotyk, który przychodzi razem ze stuknięciem budzącym wygaszony ekran, nie
+trafia do CLU. Każde stuknięcie jest wypisywane na USB (`[tap] display woken`). Tak
+można dobrać czułość: zmniejsz progi, jeśli stuknięcia nie budzą ekranu, albo zwiększ je, jeśli budzi
+go trzaśnięcie drzwiami. Kroków w pokoju IMU nie wykrywa: drgania ściany są poniżej szumu czujnika.
 Obraz przesuwa się też o 1 piksel po obwodzie kwadratu ±2 px (najwyżej co 2 min, 16 pozycji), żeby
 ostre statyczne krawędzie (narożniki, kropki stanu i stron) nie utrwalały się w jednym miejscu —
 tylko gdy ekran jest przyciemniony lub wygaszony, nigdy przy pełnej jasności. Przesuwany jest tylko

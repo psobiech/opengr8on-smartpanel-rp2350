@@ -503,3 +503,117 @@ unsigned char bsp_qmi8658_init(void)
 	}
 	// return QMI8658_chip_id;
 }
+
+// ---------------------------------------------------------------------------------------------
+// opengr8on: tap detection (QMI8658A/C tap engine). Register sequence as in lewisxhe/SensorLib
+// (SensorQMI8658: configTap / enableTap / writeCommand / getTapStatus).
+// ---------------------------------------------------------------------------------------------
+#define QMI8658_REG_CTRL8      0x09
+#define QMI8658_REG_STATUS_INT 0x2d
+#define QMI8658_CTRL8_HANDSHAKE_STATUS_INT 0x80 // CTRL9 handshake: STATUSINT bit 7 (not the INT1 pin)
+#define QMI8658_CTRL8_ACTIVITY_INT1        0x40 // tap / motion interrupts on INT1
+#define QMI8658_CTRL8_TAP_ENABLE           0x01
+#define QMI8658_CTRL1_INT1_ENABLE          0x08
+#define QMI8658_STATUS_INT_CTRL9_DONE      0x80
+#define QMI8658_STATUS1_TAP                0x02
+#define QMI8658_CTRL9_CMD_ACK              0x00
+#define QMI8658_CTRL9_CMD_CONFIGURE_TAP    0x0c
+#define QMI8658_CTRL9_TIMEOUT_US           1500000 // QMI8658A may need ~1.5 s for a CTRL9 command
+// Tap timing in accelerometer samples (500 Hz: 2 ms each)
+#define QMI8658_TAP_PEAK_WINDOW      20  // 40 ms: the peak must fall within it
+#define QMI8658_TAP_WINDOW           50  // 100 ms: quiet after the peak (below the quiet threshold)
+// Double tap is not used, but the engine has no switch for it: it reports a single tap only once
+// this window ends without a second one. Kept just past QMI8658_TAP_WINDOW (whether the engine
+// counts it from the peak or from the end of the quiet window is not documented): +10 ms wake latency.
+#define QMI8658_TAP_DOUBLE_WINDOW    (QMI8658_TAP_WINDOW + 5)
+#define QMI8658_TAP_PRIORITY_Z_Y_X   0x05
+#define QMI8658_TAP_THRESHOLD_SCALE  1024.0f // thresholds: g^2 * 1024 (QST reference: 0.8 * 0x400)
+
+static bool bsp_qmi8658_ctrl9_command(uint8_t command);
+static bool bsp_qmi8658_wait_status_int(uint8_t mask, bool set);
+static void bsp_qmi8658_write_u16(uint8_t low_reg_addr, uint16_t value);
+
+/**
+ * @brief Accelerometer only (8 g, 500 Hz; the gyroscope is not used), tap engine on.
+ *
+ * @param peak_threshold_g2  squared acceleration a tap must exceed
+ * @param quiet_threshold_g2 squared acceleration that must not be exceeded after the peak
+ * @return false if the IMU did not complete the configuration (then tap detection stays off)
+ */
+bool bsp_qmi8658_enable_tap(float peak_threshold_g2, float quiet_threshold_g2)
+{
+	uint8_t data = QMI8658_CTRL7_DISABLE_ALL;
+	bsp_qmi8658_reg_write_byte(QMI8658Register_Ctrl7, &data);
+	data = QMI8658_CTRL8_HANDSHAKE_STATUS_INT | QMI8658_CTRL8_ACTIVITY_INT1;
+	bsp_qmi8658_reg_write_byte(QMI8658_REG_CTRL8, &data);
+	bsp_qmi8658_config_acc(QMI8658AccRange_8g, QMI8658AccOdr_500Hz, QMI8658Lpf_Disable, QMI8658St_Disable);
+
+	data = QMI8658_TAP_PEAK_WINDOW;
+	bsp_qmi8658_reg_write_byte(QMI8658Register_Cal1_L, &data);
+	data = QMI8658_TAP_PRIORITY_Z_Y_X;
+	bsp_qmi8658_reg_write_byte(QMI8658Register_Cal1_H, &data);
+	bsp_qmi8658_write_u16(QMI8658Register_Cal2_L, QMI8658_TAP_WINDOW);
+	bsp_qmi8658_write_u16(QMI8658Register_Cal3_L, QMI8658_TAP_DOUBLE_WINDOW);
+	data = 0x01; // first half of the tap parameters
+	bsp_qmi8658_reg_write_byte(QMI8658Register_Cal4_H, &data);
+	bool configured = bsp_qmi8658_ctrl9_command(QMI8658_CTRL9_CMD_CONFIGURE_TAP);
+
+	data = (uint8_t)(0.0625f * 128); // alpha: peak detection filter
+	bsp_qmi8658_reg_write_byte(QMI8658Register_Cal1_L, &data);
+	data = (uint8_t)(0.25f * 128); // gamma: quiet detection filter
+	bsp_qmi8658_reg_write_byte(QMI8658Register_Cal1_H, &data);
+	bsp_qmi8658_write_u16(QMI8658Register_Cal2_L, (uint16_t)(peak_threshold_g2 * QMI8658_TAP_THRESHOLD_SCALE));
+	bsp_qmi8658_write_u16(QMI8658Register_Cal3_L, (uint16_t)(quiet_threshold_g2 * QMI8658_TAP_THRESHOLD_SCALE));
+	data = 0x02; // second half of the tap parameters
+	bsp_qmi8658_reg_write_byte(QMI8658Register_Cal4_H, &data);
+	configured = configured && bsp_qmi8658_ctrl9_command(QMI8658_CTRL9_CMD_CONFIGURE_TAP);
+
+	bsp_qmi8658_reg_read(QMI8658Register_Ctrl1, &data, 1);
+	data |= QMI8658_CTRL1_INT1_ENABLE;
+	bsp_qmi8658_reg_write_byte(QMI8658Register_Ctrl1, &data);
+	data = QMI8658_CTRL8_HANDSHAKE_STATUS_INT | QMI8658_CTRL8_ACTIVITY_INT1 | (configured ? QMI8658_CTRL8_TAP_ENABLE : 0);
+	bsp_qmi8658_reg_write_byte(QMI8658_REG_CTRL8, &data);
+	data = QMI8658_CTRL7_ACC_ENABLE;
+	bsp_qmi8658_reg_write_byte(QMI8658Register_Ctrl7, &data);
+	return configured;
+}
+
+/**
+ * @brief Tap since the last call (reading STATUS1 clears it). A double tap counts as one tap.
+ * @return false: no tap, or a failed transfer
+ */
+bool bsp_qmi8658_tap_detected(void)
+{
+	uint8_t status1 = 0;
+	return bsp_qmi8658_reg_read(QMI8658Register_Status1, &status1, 1) && (status1 & QMI8658_STATUS1_TAP);
+}
+
+// CTRL9 command: STATUSINT bit 7 signals completion, ACK (0x00) clears it.
+static bool bsp_qmi8658_ctrl9_command(uint8_t command)
+{
+	bsp_qmi8658_reg_write_byte(QMI8658Register_Ctrl9, &command);
+	bool done = bsp_qmi8658_wait_status_int(QMI8658_STATUS_INT_CTRL9_DONE, true);
+	uint8_t acknowledge = QMI8658_CTRL9_CMD_ACK;
+	bsp_qmi8658_reg_write_byte(QMI8658Register_Ctrl9, &acknowledge);
+	return bsp_qmi8658_wait_status_int(QMI8658_STATUS_INT_CTRL9_DONE, false) && done;
+}
+
+static bool bsp_qmi8658_wait_status_int(uint8_t mask, bool set)
+{
+	uint64_t deadline_us = time_us_64() + QMI8658_CTRL9_TIMEOUT_US;
+	while (time_us_64() < deadline_us)
+	{
+		uint8_t status_int = 0;
+		if (bsp_qmi8658_reg_read(QMI8658_REG_STATUS_INT, &status_int, 1) && ((status_int & mask) != 0) == set)
+			return true;
+		sleep_ms(1);
+	}
+	return false;
+}
+
+static void bsp_qmi8658_write_u16(uint8_t low_reg_addr, uint16_t value)
+{
+	uint8_t low_byte = value & 0xff, high_byte = value >> 8;
+	bsp_qmi8658_reg_write_byte(low_reg_addr, &low_byte);
+	bsp_qmi8658_reg_write_byte(low_reg_addr + 1, &high_byte);
+}
