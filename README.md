@@ -277,17 +277,34 @@ Pillow. Submoduł `external/clu-esp32` musi być pobrany. Pliki PNG do testów (
 są w repo; generuje je `python3 tools/gen_png_fixtures.py` (Pillow).
 
 ```bash
-make -C test/host test                     # testy rdzenia
+make -C test/host test                     # testy na hoście (binarki w test/host/out/)
 make -C test/host test CAPTURE="/ścieżka/tfbus_capture_20261014_171505.log"  # + odtworzenie zrzutu magistrali
+make -C test/host coverage                 # pokrycie (gcov); FAIL_UNDER=<%> = próg, VERBOSE=1 = niepokryte linie
 make -C test/host preview                  # podgląd UI -> test/host/preview_*.png
 ```
+
+`make coverage` zapisuje też `test/host/out/coverage/summary.md` (tabela Markdown) i `coverage.json`;
+wymaga tylko `gcc`/`gcov` i `python3`. CI wymaga co najmniej 95% pokrycia linii.
+
+Kod z `src/` (`main.c`, `icons.c`, `scanout.c`) test dołącza przez `#include`, z zaślepkami Pico SDK i
+FatFS z `test/host/stubs/` (same deklaracje; atrapy sprzętu definiuje każdy test).
 
 Test sprawdza na hoście:
 
 - wykrywanie i bajty statusu względem odpowiedzi prawdziwego panelu,
 - ACK na sekwencję inicjalizacji panelu z prawdziwego CLU,
+- odporność na szum na magistrali: śmieci, złe sumy kontrolne, ucięte i nieznane ramki, unicast RESET,
 - dotyk → zdarzenia przycisków, diody, PrintText / Draw / Beep, IconA / IconB według stanu,
+- dotyk na płytce (`test_main`): tapnięcie, przytrzymanie, przeciągnięcie, gesty, kilka palców,
+  środek OLED tylko dla gestów, debounce, zawieszony GT911, przełączanie stron,
+- uśpienie ekranu: przyciemnianie, wygaszenie (ST7701), połykanie budzącego dotyku, budzenie stuknięciem,
+  przesuwanie obrazu; mediana temperatury, buzzer, opóźnienie odpowiedzi RS485, start i pętla główna,
+- skanowanie ekranu (`test_scanout`): adresy tablicy linii w granicach bufora dla każdego przesunięcia,
+  bufor wierszy OLED, spóźnione wiersze; odświeżanie tylko zmienionego obszaru UI, mapowanie dotyku,
+- pamięć ikon z karty SD (`test_icons`): kolejka, brak / utrata karty i ponowienie, nazwy plików od CLU,
+  błędne pliki, negatyw, wymiana ikon spoza ekranu,
 - dekoder PNG ikon: typy koloru, głębie, filtry wierszy, przezroczystość, zmniejszanie, błędne pliki,
+  ucięte i uszkodzone pliki (pod AddressSanitizer),
 - że każda wysłana ramka przechodzi przez parser ramek ESP32 CLU.
 
 Odtworzenie zrzutu podaje ~44 tys. prawdziwych ramek z magistrali (wszystkie moduły) i sprawdza, że

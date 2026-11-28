@@ -28,6 +28,10 @@ static void bus(panel_t *panel, const char *hex);
 static void idle_bus(panel_t *panel, uint64_t duration_us);
 static void poll(panel_t *panel, uint8_t address);
 static size_t unhex(uint8_t *out, const char *hex);
+static void test_bus_robustness(void);
+static void test_unicast_frames(void);
+static void test_to_ascii(void);
+static void addressed_panel(panel_t *panel);
 
 int main(int argc, char **argv)
 {
@@ -570,10 +574,195 @@ int main(int argc, char **argv)
     poll(panel, 0x12);
     check("after RESET: no address, poll unanswered", panel->address == 0 && s_tx_frames == 0);
 
+    test_bus_robustness();
+    test_unicast_frames();
+    test_to_ascii();
+
     check("every frame sent parses on the CLU side", s_tx_unparsable == 0);
 
     printf("\n%s (%d failures)\n", failures ? "FAILED" : "PASSED", failures);
     return failures ? EXIT_FAILURE : EXIT_SUCCESS;
+}
+
+// Noise, broken and unknown frames on the bus: counted, dropped, and the next good frame is
+// answered (a module that stops answering after line noise drops off the CLU).
+static void test_bus_robustness(void)
+{
+    static panel_t robust_panel = {.transmit = on_tx};
+    panel_t *panel = &robust_panel;
+    addressed_panel(panel);
+
+    tx_reset();
+    bus(panel, "0102aa1204bc");
+    check_tx("noise before the start byte skipped, poll answered", "aa0001ab ");
+
+    tx_reset();
+    uint32_t bad_before = panel->frames_bad;
+    bus(panel, "aa120400");
+    idle_bus(panel, 2000);
+    check_tx("bad checksum: no reply", "");
+    check("bad checksum: counted", panel->frames_bad == bad_before + 1);
+    poll(panel, 0x12);
+    check_tx("bad checksum: the next poll answered", "aa0001ab ");
+
+    tx_reset();
+    bad_before = panel->frames_bad;
+    bus(panel, "aa55aa1204bc");
+    idle_bus(panel, 2000);
+    check_tx("start byte of a broken frame: resync to the next one inside it", "aa0001ab ");
+    check("broken frame counted", panel->frames_bad == bad_before + 1);
+
+    tx_reset();
+    bad_before = panel->frames_bad;
+    bus(panel, "aa1231000102");
+    idle_bus(panel, 2000);
+    check_tx("truncated TFBUS_CMD: no reply", "");
+    check("truncated frame: counted, buffer cleared", panel->frames_bad == bad_before + 1 && panel->rx_length == 0);
+
+    tx_reset();
+    bus(panel, "aa12");
+    idle_bus(panel, 2000);
+    check("1-2 stray bytes before a gap: dropped", panel->rx_length == 0);
+    poll(panel, 0x12);
+    check_tx("stray bytes: the next poll answered", "aa0001ab ");
+
+    tx_reset();
+    bad_before = panel->frames_bad;
+    uint8_t long_burst[41] = {0xaa, 0x12, 0x77};
+    panel_rx(panel, long_burst, sizeof long_burst, now);
+    check("unknown type longer than the RX buffer: dropped", panel->frames_bad >= bad_before + 1 &&
+                                                                panel->rx_length < sizeof panel->rx_buffer);
+    idle_bus(panel, 2000);
+    check("long burst: buffer cleared on idle", panel->rx_length == 0);
+    poll(panel, 0x12);
+    check_tx("long burst: the next poll answered", "aa0001ab ");
+
+    tx_reset();
+    bad_before = panel->frames_bad;
+    uint8_t unknown_burst[36] = {0xaa, 0x12, 0x77};
+    unknown_burst[35] = tfbus_xor(unknown_burst, 35);
+    panel_rx(panel, unknown_burst, sizeof unknown_burst, now);
+    idle_bus(panel, 2000);
+    check_tx("unknown type, 36-byte burst ending on idle (> 32): no reply", "");
+    check("unknown type, 36-byte burst: counted, buffer cleared", panel->frames_bad == bad_before + 1 &&
+                                                                     panel->rx_length == 0);
+
+    // a frame cut by a gap with no tick in between: the next chunk flushes it first
+    bad_before = panel->frames_bad;
+    panel_rx(panel, (const uint8_t[]){0xaa, 0x12, 0x31, 0x00}, 4, now);
+    now += PANEL_GAP_US + 500;
+    panel_rx(panel, (const uint8_t[]){0xaa, 0x12, 0x04, 0xbc}, 4, now);
+    check("gap inside panel_rx: the cut frame dropped", panel->frames_bad == bad_before + 1);
+    check_tx("gap inside panel_rx: the following poll answered", "aa0001ab ");
+
+    tx_reset();
+    uint32_t unknown_before = panel->frames_unknown;
+    frame(panel, 0x12, 0x77, (const uint8_t[]){0x01}, 1);
+    idle_bus(panel, 2000);
+    check_tx("unknown frame type (ends on idle): ACK", "aa0001ab ");
+    check("unknown frame type: counted", panel->frames_unknown == unknown_before + 1);
+
+    static const struct {
+        uint8_t type;
+        size_t payload_length;
+        const char *name;
+    } k_fixed_length_frames[] = {
+        {0x09, 1, "type 0x09 (5 bytes): ACK"},
+        {0x13, 5, "type 0x13 (9 bytes): ACK"},
+        {0xfb, 21, "type 0xfb (25 bytes): ACK"},
+        {0x1e, 0, "type 0x1e (4 bytes): ACK"},
+        {0xf0, 2, "type 0xf0 (length byte): ACK"},
+    };
+    for (size_t i = 0; i < sizeof k_fixed_length_frames / sizeof k_fixed_length_frames[0]; i++) {
+        uint8_t payload[24] = {0};
+        if (k_fixed_length_frames[i].type == 0xf0) {
+            payload[0] = 2; // length byte: 4 + 2 bytes
+        }
+        tx_reset();
+        frame(panel, 0x12, k_fixed_length_frames[i].type, payload, k_fixed_length_frames[i].payload_length);
+        check_tx(k_fixed_length_frames[i].name, "aa0001ab ");
+    }
+
+    tx_reset();
+    bus(panel, "aaff0a55");
+    check_tx("unknown broadcast: no reply", "");
+}
+
+// Unicast frames the panel answers differently from ACK, and settings it rejects.
+static void test_unicast_frames(void)
+{
+    static panel_t unicast_panel = {.transmit = on_tx, .log = on_log};
+    panel_t *panel = &unicast_panel;
+    addressed_panel(panel);
+
+    tx_reset();
+    frame(panel, 0x12, 0xf9, NULL, 0);
+    check_tx("VERSION_QUERY: no reply (like the real panel)", "");
+
+    tx_reset();
+    frame(panel, 0x12, 0x18, (const uint8_t[]){0x01, 0x00, LED_GREEN}, 3);
+    check("LED_CMD green", panel->led[0] == LEDS_GREEN && panel->led[1] == LEDS_OFF);
+    frame(panel, 0x12, 0x18, (const uint8_t[]){0x01, 0x00, 0x55}, 3);
+    check("LED_CMD unknown command: LED kept", panel->led[0] == LEDS_GREEN);
+    check_tx("LED_CMD: ACK either way", "aa0001ab aa0001ab ");
+
+    frame(panel, 0x12, 0x17, (const uint8_t[]){0x01, 0x00, 0x07}, 3);
+    check("button mode 7 unknown: mode kept", panel->button_mode[0] == BUTTON_MODE_MONOSTABLE);
+
+    tx_reset();
+    uint32_t unknown_before = panel->frames_unknown;
+    uint8_t tfbus_command[22] = {0x7e, 1, 2, 3, 4};
+    frame(panel, 0x12, 0x31, tfbus_command, sizeof tfbus_command);
+    check("unknown TFBUS_CMD: counted, ACK", panel->frames_unknown == unknown_before + 1 &&
+                                                 strcmp(s_tx_hex, "aa0001ab ") == 0);
+
+    panel_touch(panel, PANEL_SLOTS, true, now);
+    panel_touch(panel, -1, true, now);
+    check("touch on a slot outside 0..3: ignored", panel->button_values == 0);
+
+    tx_reset();
+    frame(panel, 0x12, 0x07, NULL, 0);
+    check_tx("unicast RESET: no reply", "");
+    check("unicast RESET: address released", panel->address == 0 && panel->last_poll_us == 0);
+    poll(panel, 0x12);
+    check_tx("unicast RESET: polls no longer answered", "");
+}
+
+static void test_to_ascii(void)
+{
+    char ascii[32];
+    check("UTF-8 Polish letters lose their diacritics",
+          panel_to_ascii(ascii, sizeof ascii, "Łódź ĄĆĘŃŚŹŻ ąćęńśźż") == 20 &&
+              strcmp(ascii, "Lodz ACENSZZ acenszz") == 0);
+    panel_to_ascii(ascii, sizeof ascii, "21\xc2\xb0" "C 21\xb0" "C");
+    check("degree sign (UTF-8 and Latin-1) = 0x7f", strcmp(ascii, "21\x7f" "C 21\x7f" "C") == 0);
+    panel_to_ascii(ascii, sizeof ascii, "\xe2\x82\xac \x80 \t");
+    check("other characters, lone continuation bytes and controls = '?'", strcmp(ascii, "? ? ?") == 0);
+    check("output cut at the buffer size", panel_to_ascii(ascii, 4, "abcdef") == 3 && strcmp(ascii, "abc") == 0);
+    panel_to_ascii(ascii, sizeof ascii, "\xc5");
+    check("truncated UTF-8 sequence at the end = '?'", strcmp(ascii, "?") == 0);
+
+    static uint8_t size_zero[OLED_W * OLED_H / 8], size_one[OLED_W * OLED_H / 8];
+    static uint8_t size_nine[OLED_W * OLED_H / 8], size_three[OLED_W * OLED_H / 8];
+    panel_oled_text(size_zero, 0, 0, 0, "Ab");
+    panel_oled_text(size_one, 0, 0, 1, "Ab");
+    panel_oled_text(size_nine, 0, 0, 9, "Ab");
+    panel_oled_text(size_three, 0, 0, 3, "Ab");
+    check("font size clamped to 1..3", memcmp(size_zero, size_one, sizeof size_one) == 0 &&
+                                           memcmp(size_nine, size_three, sizeof size_three) == 0);
+    static uint8_t clipped[OLED_W * OLED_H / 8];
+    panel_oled_text(clipped, OLED_W - 3, OLED_H - 3, 3, "WWWW");
+    panel_oled_text(clipped, -20, -20, 3, "WWWW");
+    check("text past the OLED edges is clipped", true);
+}
+
+// Fresh panel at address 0x12, polled by the CLU.
+static void addressed_panel(panel_t *panel)
+{
+    panel_init(panel, 0x0f057b79);
+    panel->address = 0x12;
+    panel->last_poll_us = now;
+    panel->display_activity_us = now + 3600000000ull; // no display sleep (display record) during the test
 }
 
 // Replay a whole real bus capture (CLU frames + every module's replies) into a panel with the
