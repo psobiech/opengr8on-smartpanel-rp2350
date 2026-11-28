@@ -6,6 +6,8 @@ static bsp_touch_info_t *g_touch_info;
 static bsp_touch_interface_t *g_touch_if;
 static bool g_gt911_irq_flag = false;
 
+static void bsp_gt911_print_config(void);
+
 
 bsp_touch_interface_t *bsp_gt911_get_touch_interface(void)
 {
@@ -173,6 +175,7 @@ void bsp_gt911_init(void)
         if (strstr((char *)data, "911"))
         {
             printf("GT911_ID:%s\r\n", data);
+            bsp_gt911_print_config();
             break;
         }
         else
@@ -184,6 +187,58 @@ void bsp_gt911_init(void)
     gpio_set_dir(BSP_GT911_INT_PIN, GPIO_IN);
     gpio_pull_up(BSP_GT911_INT_PIN);
     gpio_set_irq_enabled_with_callback(BSP_GT911_INT_PIN, GPIO_IRQ_EDGE_FALL, true, touch_irq_callbac);
+}
+
+// opengr8on diagnostics: the config fields that decide which touches the GT911 reports (read only).
+// Offsets from GT911_REG_CONFIG per the GT911 programming guide.
+static void bsp_gt911_print_config(void)
+{
+    uint8_t config[16]; // 0x8047..0x8056
+    if (!bsp_gt911_reg_read_byte(GT911_REG_CONFIG, config, sizeof config))
+    {
+        printf("[gt911] config read failed\n");
+        return;
+    }
+    printf("[gt911] config version 0x%02x, module switch1 0x%02x, shake count 0x%02x, filter 0x%02x, "
+           "large touch %u, noise reduction %u, touch level %u, leave level %u, refresh rate %u (%u ms)\n",
+           config[0], config[6], config[8], config[9], config[10], config[11], config[12], config[13],
+           config[15], 5 + (config[15] & 0x0f));
+}
+
+// Config block 0x8047..0x80FE, then its checksum (0x80FF: two's complement of the byte sum) and
+// Config_Fresh (0x8100 = 1: apply). The config version (first byte) is kept: the GT911 refuses
+// a lower one.
+#define GT911_CONFIG_LENGTH       184
+#define GT911_CONFIG_TOUCH_LEVEL  12 // 0x8053
+#define GT911_CONFIG_LEAVE_LEVEL  13 // 0x8054
+
+bool bsp_gt911_set_touch_levels(uint8_t touch_level, uint8_t leave_level)
+{
+    uint8_t config[GT911_CONFIG_LENGTH + 2];
+    if (!bsp_gt911_reg_read_byte(GT911_REG_CONFIG, config, GT911_CONFIG_LENGTH))
+    {
+        printf("[gt911] config read failed, touch levels not set\n");
+        return false;
+    }
+    uint8_t old_touch_level = config[GT911_CONFIG_TOUCH_LEVEL], old_leave_level = config[GT911_CONFIG_LEAVE_LEVEL];
+    if (old_touch_level == touch_level && old_leave_level == leave_level)
+    {
+        return true;
+    }
+    config[GT911_CONFIG_TOUCH_LEVEL] = touch_level;
+    config[GT911_CONFIG_LEAVE_LEVEL] = leave_level;
+    uint8_t checksum = 0;
+    for (int i = 0; i < GT911_CONFIG_LENGTH; i++)
+    {
+        checksum += config[i];
+    }
+    config[GT911_CONFIG_LENGTH] = (uint8_t)(~checksum + 1);
+    config[GT911_CONFIG_LENGTH + 1] = 1;
+    bool written = bsp_i2c_write_reg16(GT911_DEVICE_ADDR, GT911_REG_CONFIG, config, sizeof config);
+    printf("[gt911] touch level %u -> %u, leave level %u -> %u%s\n", old_touch_level, touch_level, old_leave_level,
+           leave_level, written ? "" : ": write failed");
+    sleep_ms(100); // the GT911 stores and applies the new config
+    return written;
 }
 
 bool bsp_touch_new_gt911(bsp_touch_interface_t **interface, bsp_touch_info_t *info)

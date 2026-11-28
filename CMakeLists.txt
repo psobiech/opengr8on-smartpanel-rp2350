@@ -37,10 +37,13 @@ option(PANEL_DISPLAY_BLANK "Blank the display 10 s after it starts dimming (Prox
 option(PANEL_TAP_WAKE "Wake the display on a knock on the panel (QMI8658 tap detection)" ON)
 set(PANEL_TAP_PEAK_G2 "0.5" CACHE STRING "Tap: squared acceleration a knock must exceed, g^2 (lower = more sensitive)")
 set(PANEL_TAP_QUIET_G2 "0.2" CACHE STRING "Tap: squared acceleration the panel must settle below after the peak, g^2 (below PANEL_TAP_PEAK_G2)")
+set(PANEL_TOUCH_LEVEL "60" CACHE STRING "GT911 touch level (lower = more sensitive; stored in the GT911; the board shipped with 80)")
+set(PANEL_TOUCH_LEAVE_LEVEL "40" CACHE STRING "GT911 leave level (below PANEL_TOUCH_LEVEL; the board shipped with 60)")
 target_compile_definitions(smartpanel PRIVATE PANEL_SN=${PANEL_SN} PANEL_DISPLAY_BRIGHTNESS=${PANEL_DISPLAY_BRIGHTNESS}
                            PANEL_DISPLAY_DIM_BRIGHTNESS=${PANEL_DISPLAY_DIM_BRIGHTNESS}
                            PANEL_DISPLAY_BLANK=$<BOOL:${PANEL_DISPLAY_BLANK}> PANEL_TAP_WAKE=$<BOOL:${PANEL_TAP_WAKE}>
                            PANEL_TAP_PEAK_G2=${PANEL_TAP_PEAK_G2}f PANEL_TAP_QUIET_G2=${PANEL_TAP_QUIET_G2}f
+                           PANEL_TOUCH_LEVEL=${PANEL_TOUCH_LEVEL} PANEL_TOUCH_LEAVE_LEVEL=${PANEL_TOUCH_LEAVE_LEVEL}
                            PICO_EMBED_XIP_SETUP=1
                            PICO_STACK_SIZE=0x1000) # all of SCRATCH_Y: the PNG inflate (puff) needs ~1.5 KB
 target_link_libraries(smartpanel pico_stdlib pico_unique_id pico_multicore hardware_uart hardware_pwm hardware_adc

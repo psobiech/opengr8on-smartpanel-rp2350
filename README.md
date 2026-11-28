@@ -178,6 +178,7 @@ wygenerowania potrzeba Pillow i Noto Sans: `python3 tools/gen_font.py > src/font
 | Uśpiony ekran | wygaszany po 10 s przyciemnienia | `cmake -B build -DPANEL_DISPLAY_BLANK=OFF` (tylko przyciemniony) |
 | Budzenie stuknięciem | włączone | `cmake -B build -DPANEL_TAP_WAKE=OFF` |
 | Czułość stuknięcia | szczyt `0.5` g², cisza `0.2` g² | `cmake -B build -DPANEL_TAP_PEAK_G2=0.3 -DPANEL_TAP_QUIET_G2=0.1` (cisza < szczyt) |
+| Czułość dotyku (GT911) | dotyk `60`, puszczenie `40` (fabrycznie `80` / `60`: lekkie stuknięcia opuszkiem gubione) | `cmake -B build -DPANEL_TOUCH_LEVEL=50 -DPANEL_TOUCH_LEAVE_LEVEL=30` (niżej = czulej, puszczenie < dotyk; zapisywane w GT911, zostaje po zmianie firmware) |
 
 **Uśpienie ekranu** (ochrona LCD przed utrwaleniem obrazu): po `ProximityTimeout` (domyślnie 5 s,
 ustawiane z OM) bez dotyku ekran zasypia (CLU dostaje OnDisplayOff): podświetlenie w 1 s spada do

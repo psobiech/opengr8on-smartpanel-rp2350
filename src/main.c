@@ -46,6 +46,17 @@
 #define BUZZER_PIN    1
 #define TOUCH_STALE_US   150000 // no GT911 report for this long while "touched" = released
 #define TOUCH_RELEASE_US 40000  // release debounce
+// GT911 sensitivity (CMake options PANEL_TOUCH_LEVEL / PANEL_TOUCH_LEAVE_LEVEL, lower = more
+// sensitive; written to the GT911, which keeps it). The board shipped with 80 / 60: light fingertip
+// taps were missed (no GT911 touch report).
+#ifndef PANEL_TOUCH_LEVEL
+#define PANEL_TOUCH_LEVEL 60
+#endif
+#ifndef PANEL_TOUCH_LEAVE_LEVEL
+#define PANEL_TOUCH_LEAVE_LEVEL 40
+#endif
+_Static_assert(0 < PANEL_TOUCH_LEAVE_LEVEL && PANEL_TOUCH_LEAVE_LEVEL < PANEL_TOUCH_LEVEL && PANEL_TOUCH_LEVEL <= 255,
+               "0 < PANEL_TOUCH_LEAVE_LEVEL < PANEL_TOUCH_LEVEL <= 255");
 
 // Serial number: -DPANEL_SN=0x0f05xxxx, else derived from the flash unique ID. Derived SNs use
 // 0x0f05f000..0x0f05ffff, away from the range real panels were seen in (0x0f057bxx).
@@ -117,8 +128,10 @@ static uint8_t s_tx_queue[64];
 static volatile size_t s_tx_queue_length;
 static volatile bool s_tx_armed;
 
-// Buzzer (PWM, frequency + volume, stopped from the main loop)
-static uint64_t s_beep_end_us;
+// Buzzer (PWM, frequency + volume). A timer alarm ends the beep, so its length does not depend on
+// what the main loop is busy with (a press redraw used to stretch a 20 ms click to ~30 ms or more).
+static alarm_id_t s_beep_alarm;
+static uint64_t s_beep_end_us; // only when no alarm slot was free: buzzer_poll() ends the beep
 
 // Temperature: QMI8658 die sensor (fallback: RP2350 internal sensor)
 static bool s_have_imu;
@@ -198,9 +211,13 @@ static void snapshot(ui_view_t *view, uint64_t now);
 static void flush_log(void);
 static void rs485_stats(uint64_t now);
 static void scanout_stats(uint64_t now);
+static void loop_step_done(const char *step_name, uint64_t step_start_us);
+static void loop_stats(uint64_t now);
 static void rs485_irq(void);
 static void on_tx(const uint8_t *frame, size_t frame_length, void *context);
 static int64_t tx_alarm(alarm_id_t id, void *user_data);
+static int64_t buzzer_stop_alarm(alarm_id_t id, void *user_data);
+static void buzzer_stop(void);
 static void on_log(const char *message, void *context);
 
 int main(void)
@@ -235,6 +252,7 @@ int main(void)
     bsp_touch_info_t touch_info = {.width = LCD_W, .height = LCD_H, .rotation = 0};
     bsp_touch_new_gt911(&touch, &touch_info);
     touch->init();
+    bsp_gt911_set_touch_levels(PANEL_TOUCH_LEVEL, PANEL_TOUCH_LEAVE_LEVEL);
 
     icons_init(); // after the display init (DMA channel 0)
 
@@ -266,27 +284,35 @@ int main(void)
     for (;;) {
         uint64_t now = time_us_64();
         LOCKED(panel_tick(&s_panel, now));
+        uint64_t step_start_us = now;
         display_poll(now);
         pixel_shift_poll(now);
+        loop_step_done("display", step_start_us);
 
         if (now >= next_touch) { // GT911 at 100 Hz
             next_touch = now + 10000;
+            step_start_us = time_us_64();
             touch->read();
             now = time_us_64(); // after read(): the report stamp must not be newer than `now`
             touch_poll(touch, now);
+            loop_step_done("touch", step_start_us);
         }
 
         if (s_have_tap && now >= next_tap) {
             next_tap = now + TAP_POLL_US;
+            step_start_us = time_us_64();
             tap_poll(now);
+            loop_step_done("tap", step_start_us);
         }
 
         if (now >= next_temperature) {
             next_temperature = now + 1000000;
+            step_start_us = time_us_64();
             float temperature = read_temp();
             if (!isnan(temperature)) {
                 LOCKED(panel_set_temp(&s_panel, temperature));
             }
+            loop_step_done("temperature", step_start_us);
         }
 
         uint16_t beep_frequency_hz, beep_duration_ms, beep_volume;
@@ -299,13 +325,20 @@ int main(void)
 
         if (now >= next_render) { // <= 25 fps; LED flash phases need periodic checks
             next_render = now + 30000;
+            step_start_us = time_us_64();
             snapshot(&view, now);
             ui_render(&view); // redraws only regions that changed
+            loop_step_done("render", step_start_us);
         }
+        step_start_us = time_us_64();
         icons_poll();
+        loop_step_done("icons", step_start_us);
+        step_start_us = time_us_64();
         flush_log();
+        loop_step_done("log", step_start_us);
         rs485_stats(now);
         scanout_stats(now);
+        loop_stats(now);
 
         if (s_display_blank) { // light sleep: any interrupt or the timeout wakes the core
             best_effort_wfe_or_timeout(make_timeout_time_us(BLANK_WAKE_INTERVAL_US));
@@ -689,6 +722,12 @@ static void buzzer_beep(uint16_t frequency_hz, uint16_t duration_ms, uint16_t vo
     if (volume > 16) {
         volume = 16;
     }
+    // First: the previous beep's alarm must not end this one. Once cancel_alarm() returns, that
+    // alarm cannot fire any more (if it fired just before, it only stopped the previous beep).
+    if (s_beep_alarm > 0) {
+        cancel_alarm(s_beep_alarm);
+        s_beep_alarm = 0;
+    }
     uint slice = pwm_gpio_to_slice_num(BUZZER_PIN);
     float clock_divider = (float)clock_get_hz(clk_sys) / ((float)frequency_hz * 1000.0f);
     if (clock_divider < 1.0f) {
@@ -697,15 +736,22 @@ static void buzzer_beep(uint16_t frequency_hz, uint16_t duration_ms, uint16_t vo
     pwm_set_clkdiv(slice, clock_divider);
     pwm_set_wrap(slice, 999);
     pwm_set_chan_level(slice, pwm_gpio_to_channel(BUZZER_PIN), (uint16_t)(500 * volume / 16)); // 50% duty = max
-    s_beep_end_us = time_us_64() + (uint64_t)(duration_ms ? duration_ms : 1) * 1000;
+    uint64_t duration_us = (uint64_t)(duration_ms ? duration_ms : 1) * 1000;
+    s_beep_alarm = add_alarm_in_us(duration_us, buzzer_stop_alarm, NULL, true);
+    s_beep_end_us = s_beep_alarm > 0 ? 0 : time_us_64() + duration_us; // no alarm slot: buzzer_poll() ends it
 }
 
 static void buzzer_poll(uint64_t now)
 {
     if (s_beep_end_us && now >= s_beep_end_us) {
-        pwm_set_chan_level(pwm_gpio_to_slice_num(BUZZER_PIN), pwm_gpio_to_channel(BUZZER_PIN), 0);
+        buzzer_stop();
         s_beep_end_us = 0;
     }
+}
+
+static void buzzer_stop(void)
+{
+    pwm_set_chan_level(pwm_gpio_to_slice_num(BUZZER_PIN), pwm_gpio_to_channel(BUZZER_PIN), 0);
 }
 
 // ---------------------------------------------------------------------------------------------
@@ -807,6 +853,37 @@ static void scanout_stats(uint64_t now)
     }
 }
 
+// Main loop steps that block it: while one runs, the GT911 is not read, so a tap shorter than the
+// step can be missed and the buzzer / panel_tick() timings stretch. The longest step is reported
+// (every 5 s at most) when it took LOOP_STALL_REPORT_US or more. "display" includes the intended
+// ~ST7701_SLEEP_US wake from blank.
+#define LOOP_STALL_REPORT_US 20000
+static const char *s_longest_step_name;
+static uint64_t s_longest_step_us;
+
+static void loop_step_done(const char *step_name, uint64_t step_start_us)
+{
+    uint64_t step_duration_us = time_us_64() - step_start_us;
+    if (step_duration_us > s_longest_step_us) {
+        s_longest_step_us = step_duration_us;
+        s_longest_step_name = step_name;
+    }
+}
+
+static void loop_stats(uint64_t now)
+{
+    static uint64_t next_us;
+    if (now < next_us) {
+        return;
+    }
+    next_us = now + 5000000;
+    if (s_longest_step_us >= LOOP_STALL_REPORT_US) {
+        printf("[loop] longest step in the last 5 s: %s, %lu ms\n", s_longest_step_name,
+               (unsigned long)(s_longest_step_us / 1000));
+    }
+    s_longest_step_us = 0;
+}
+
 // ---------------------------------------------------------------------------------------------
 // IRQ / alarm / core callbacks
 // ---------------------------------------------------------------------------------------------
@@ -855,6 +932,15 @@ static int64_t tx_alarm(alarm_id_t id, void *user_data)
     s_tx_armed = false;
     restore_interrupts(saved_interrupts);
     uart_write_blocking(RS485_UART, frames, frames_length); // <= 64 bytes, a few FIFO refills at most
+    return 0;
+}
+
+// The beep's end (buzzer_beep). It does not touch s_beep_alarm: only the main loop writes it, and
+// cancelling an alarm that already fired is harmless.
+static int64_t buzzer_stop_alarm(alarm_id_t id, void *user_data)
+{
+    (void)id, (void)user_data;
+    buzzer_stop();
     return 0;
 }
 

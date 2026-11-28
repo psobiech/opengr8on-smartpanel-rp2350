@@ -628,7 +628,7 @@ void panel_touch(panel_t *panel, int slot, bool down, uint64_t now_us)
     if (down) {
         int button = panel_slot_button(panel, slot);
         panel->slot_button[slot] = (uint8_t)button;
-        request_beep(panel, 2700, 20, 8);
+        request_beep(panel, 2700, 30, 8); // key click (30 ms: 20 ms sounded clipped once the length was exact)
         if (panel->button_mode[button] == BUTTON_MODE_BISTABLE) { // each press toggles, release keeps it
             set_button_value(panel, button, !(panel->button_values & (1u << button)));
         } else if (panel->button_mode[button] == BUTTON_MODE_MONOSTABLE) {

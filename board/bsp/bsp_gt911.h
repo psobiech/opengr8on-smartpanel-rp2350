@@ -25,4 +25,9 @@ bool bsp_touch_new_gt911(bsp_touch_interface_t **interface, bsp_touch_info_t *in
 bsp_touch_interface_t *bsp_gt911_get_touch_interface(void);
 uint64_t bsp_gt911_last_report_us(void); // time of the last GT911 report (touch or release)
 
+// opengr8on: set Screen_Touch_Level / Screen_Leave_Level (touch sensitivity, lower = more sensitive;
+// leave < touch). The rest of the config is kept as read from the chip. Written only when they
+// differ: the GT911 keeps its config across power cycles.
+bool bsp_gt911_set_touch_levels(uint8_t touch_level, uint8_t leave_level);
+
 #endif
