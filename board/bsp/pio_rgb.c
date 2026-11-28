@@ -17,6 +17,12 @@ static uint rgb_sm;
 
 static int rgb_dma_chan;
 
+// opengr8on: program offsets, kept for pio_rgb_set_scanout_enabled()
+static uint hsync_offset;
+static uint vsync_offset;
+static uint rgb_de_offset;
+static uint rgb_offset;
+
 static pio_rgb_info_t *g_pio_rgb_info;
 static uint16_t *buffer;
 
@@ -388,10 +394,10 @@ void pio_rgb_init(pio_rgb_info_t *info, pio_rgb_pin_t *pin)
 
     // 中文：添加pio 程序
     // English: Add pio program
-    uint hsync_offset = pio_add_program(RGB_SYNC_PIO, &hsync_program);
-    uint vsync_offset = pio_add_program(RGB_SYNC_PIO, &vsync_program);
-    uint rgb_de_offset = pio_add_program(RGB_COLOR_DATA_PIO, &rgb_de_program);
-    uint rgb_offset = pio_add_program(RGB_COLOR_DATA_PIO, &rgb_program);
+    hsync_offset = pio_add_program(RGB_SYNC_PIO, &hsync_program);
+    vsync_offset = pio_add_program(RGB_SYNC_PIO, &vsync_program);
+    rgb_de_offset = pio_add_program(RGB_COLOR_DATA_PIO, &rgb_de_program);
+    rgb_offset = pio_add_program(RGB_COLOR_DATA_PIO, &rgb_program);
 
     // 中文：初始化pio 程序
     // English: Initialize pio program
@@ -410,6 +416,62 @@ void pio_rgb_init(pio_rgb_info_t *info, pio_rgb_pin_t *pin)
 
     pio_enable_sm_mask_in_sync(RGB_COLOR_DATA_PIO, ((1u << rgb_de_sm) | (1u << rgb_sm)));
     pio_enable_sm_mask_in_sync(RGB_SYNC_PIO, ((1u << hsync_sm) | (1u << vsync_sm)));
+
+    dma_complete_handler();
+}
+
+// opengr8on: stop / restart the scan-out (display blank: the ST7701 sleeps, no RGB signals needed).
+// Stop: the state machines halt, the DMA channel is aborted (its completion IRQ, which re-arms the
+// next frame, is masked first). Start: every state machine is reset to the beginning of its program
+// with the same counts as pio_rgb_init(), and the DMA restarts at the beginning of a frame
+// (_framebuffer, so the pixel shift is kept), so the sync and data machines start in step.
+void pio_rgb_set_scanout_enabled(bool enabled)
+{
+    uint sync_mask = (1u << hsync_sm) | (1u << vsync_sm);
+    uint color_data_mask = (1u << rgb_de_sm) | (1u << rgb_sm);
+    if (!enabled)
+    {
+        pio_set_sm_mask_enabled(RGB_SYNC_PIO, sync_mask, false);
+        pio_set_sm_mask_enabled(RGB_COLOR_DATA_PIO, color_data_mask, false);
+        dma_irqn_set_channel_enabled(1, rgb_dma_chan, false);
+        dma_channel_abort(rgb_dma_chan);
+        dma_irqn_acknowledge_channel(1, rgb_dma_chan);
+        return;
+    }
+
+    const struct
+    {
+        PIO pio;
+        uint sm;
+        uint offset;
+        uint32_t count;
+    } machines[] = {
+        {RGB_SYNC_PIO, hsync_sm, hsync_offset, g_pio_rgb_info->width - 1u},
+        {RGB_SYNC_PIO, vsync_sm, vsync_offset, g_pio_rgb_info->height - 1u},
+        {RGB_COLOR_DATA_PIO, rgb_de_sm, rgb_de_offset, g_pio_rgb_info->height - 1u},
+        {RGB_COLOR_DATA_PIO, rgb_sm, rgb_offset, g_pio_rgb_info->width - 1u},
+    };
+    for (size_t i = 0; i < sizeof machines / sizeof machines[0]; i++)
+    {
+        pio_sm_clear_fifos(machines[i].pio, machines[i].sm);
+        pio_sm_restart(machines[i].pio, machines[i].sm);
+        pio_sm_exec(machines[i].pio, machines[i].sm, pio_encode_jmp(machines[i].offset));
+    }
+    for (uint irq_flag = 0; irq_flag <= 2; irq_flag++) // rgb -> rgb_de (0), vsync (1), hsync -> vsync (2)
+    {
+        pio_interrupt_clear(RGB_SYNC_PIO, irq_flag);
+        pio_interrupt_clear(RGB_COLOR_DATA_PIO, irq_flag);
+    }
+    for (size_t i = 0; i < sizeof machines / sizeof machines[0]; i++)
+    {
+        pio_sm_put_blocking(machines[i].pio, machines[i].sm, machines[i].count);
+    }
+    g_pio_rgb_info->transfer_index = 0;
+    dma_irqn_acknowledge_channel(1, rgb_dma_chan);
+    dma_irqn_set_channel_enabled(1, rgb_dma_chan, true);
+
+    pio_enable_sm_mask_in_sync(RGB_COLOR_DATA_PIO, color_data_mask);
+    pio_enable_sm_mask_in_sync(RGB_SYNC_PIO, sync_mask);
 
     dma_complete_handler();
 }

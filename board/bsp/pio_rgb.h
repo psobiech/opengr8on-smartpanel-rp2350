@@ -69,6 +69,12 @@ void pio_rgb_change_framebuffer(void);
  */
 void pio_rgb_update_framebuffer(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t y2, uint16_t *color_p);
 
+/**
+ * opengr8on: stop (false) / restart (true) the RGB scan-out (PIO state machines + DMA).
+ * Restart begins with a new frame.
+ */
+void pio_rgb_set_scanout_enabled(bool enabled);
+
 
 #ifdef __cplusplus
 }

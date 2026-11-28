@@ -129,7 +129,9 @@ Brakuje / nie zostało rozpoznane:
   [ESP32 CLU](https://github.com/psobiech/opengr8on-clu-esp32) (np. na płytce
   [Waveshare ESP32-S3-RS485-CAN](https://www.waveshare.com/wiki/ESP32-S3-RS485-CAN)).
 - Przewód do RS485: **A/B płytki → A/B TFBUS, wspólna masa**. Transceiver na płytce sam przełącza
-  kierunek (brak pinu DE).
+  kierunek (brak pinu DE), więc nadaje, gdy TX jest nisko. Zalecany **pull-up 4,7–10 kΩ z GPIO 8
+  (TX) do 3V3**: bez niego reset albo wgrywanie panelu blokuje magistralę i pozostałe moduły tracą
+  adres (zob. [Magistrala](#magistrala)).
 - Zasilanie płytki zgodnie z [dokumentacją Waveshare](https://www.waveshare.com/wiki/RP2350-Touch-LCD-4) (np. USB-C).
 - Kabel USB do wgrania firmware i podglądu logów.
 
@@ -174,7 +176,10 @@ wygenerowania potrzeba Pillow i Noto Sans: `python3 tools/gen_font.py > src/font
 ustawiane z OM) bez dotyku ekran zasypia (CLU dostaje OnDisplayOff): podświetlenie w 1 s spada do
 `PANEL_DISPLAY_DIM_BRIGHTNESS` (domyślnie 5%), ekran jest dalej czytelny, a przyciski działają. Po kolejnych 10 s ekran jest wygaszany:
 podświetlenie i wyjście ST7701 (Display Off) są wyłączane, a dotyk, który go budzi, nie trafia do
-CLU (nie widać, co się dotyka). Z `PANEL_DISPLAY_BLANK=OFF` ekran zostaje przyciemniony. Dotyk
+CLU (nie widać, co się dotyka). Wygaszony ST7701 jest usypiany (Sleep In), po 120 ms zatrzymywane
+jest wysyłanie obrazu (PIO + DMA), a pętla główna śpi (WFE) między przerwaniami — TFBUS jest dalej
+obsługiwany z przerwania UART, a GT911 budzi ją przerwaniem INT. Wybudzenie z wygaszenia trwa
+~120 ms (Sleep Out). Z `PANEL_DISPLAY_BLANK=OFF` ekran zostaje przyciemniony. Dotyk
 budzi ekran od razu, do pełnej jasności (`PANEL_DISPLAY_BRIGHTNESS`).
 Obraz przesuwa się też o 1 piksel po obwodzie kwadratu ±2 px (najwyżej co 2 min, 16 pozycji), żeby
 ostre statyczne krawędzie (narożniki, kropki stanu i stron) nie utrwalały się w jednym miejscu —
@@ -198,8 +203,13 @@ trzymało DE, i pierwsze bajty ginęły.
 Pin TX jest ustawiany w stan wysoki jako pierwsza rzecz w `main()`. Po resecie ma domyślny
 pull-down, a transceiver z automatycznym kierunkiem nadaje, gdy TX jest nisko. Do czasu
 inicjalizacji UART (ok. 1,3 s, po wyświetlaczu i dotyku) magistrala była zablokowana, a
-prawdziwe moduły Grenton traciły wtedy adres. Podczas bootromu i trybu BOOTSEL (wgrywanie przez
-USB) pin nadal jest nisko: pomaga tylko rezystor pull-up (4,7–10 kΩ do 3V3) na TX transceivera.
+prawdziwe moduły Grenton traciły wtedy adres. Zostaje czas, gdy przycisk reset jest wciśnięty,
+plus bootrom, do pierwszej linii `main()` (zmierzone ok. 150 ms), oraz cały tryb BOOTSEL
+(wgrywanie przez USB). Wtedy pin nadal jest nisko i to wystarcza, żeby prawdziwy moduł Grenton
+na tej samej magistrali stracił adres. ESP32 CLU adresuje go ponownie w ok. 1 s, ale prawdziwe
+CLU ponawia ADDR_ASSIGN tylko co ok. 3 s. Firmware tego nie naprawi: pomaga tylko rezystor pull-up
+4,7–10 kΩ z wejścia TX transceivera (GPIO 8) do 3V3, silniejszy niż wewnętrzny pull-down
+(ok. 50 kΩ).
 
 ### Dodanie panelu do CLU
 

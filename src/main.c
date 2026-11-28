@@ -4,7 +4,8 @@
 // The TFBUS module logic lives in core/panel_core.c (host-tested). This file is the board glue:
 //   UART1 RX IRQ -> panel_rx() (replies go out from a timer 800 us after the request: bus turnaround),
 //   main loop     -> touch, panel_tick(), display sleep, pixel shift, buzzer, temperature, rendering
-//                    of the replica UI.
+//                    of the replica UI; while the display is blank the core sleeps (WFE) between
+//                    interrupts (UART RX, GT911 INT, timers), at least every BLANK_WAKE_INTERVAL_US.
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -64,6 +65,8 @@
 #endif
 #define DISPLAY_FADE_US        1000000  // awake -> dimmed
 #define DISPLAY_BLANK_AFTER_US 10000000 // dimmed -> blank, counted from the start of the fade
+#define ST7701_SLEEP_US        120000   // ST7701: Sleep In -> scan-out stop / Sleep Out, Sleep Out -> Display On
+#define BLANK_WAKE_INTERVAL_US 1000     // main loop wake-up while blank: panel_tick() timing (PANEL_GAP_US)
 _Static_assert(PANEL_DISPLAY_DIM_BRIGHTNESS >= 0 && PANEL_DISPLAY_DIM_BRIGHTNESS <= PANEL_DISPLAY_BRIGHTNESS &&
                    PANEL_DISPLAY_BRIGHTNESS <= 100,
                "0 <= PANEL_DISPLAY_DIM_BRIGHTNESS <= PANEL_DISPLAY_BRIGHTNESS <= 100 (percent)");
@@ -107,7 +110,9 @@ static bsp_display_interface_t *s_display;
 static uint8_t s_backlight_percent = PANEL_DISPLAY_BRIGHTNESS;
 static bool s_display_asleep;     // the panel's display is off: dimming / blank
 static uint64_t s_asleep_since_us;
-static bool s_display_blank;      // backlight off and ST7701 Display Off
+static bool s_display_blank;      // backlight off, ST7701 Display Off + Sleep In
+static uint64_t s_blank_since_us; // ST7701 Sleep In sent
+static bool s_scanout_stopped;    // RGB scan-out (PIO + DMA) stopped while blank
 static bool s_wake_touch;         // the touch that woke a blank display: not passed to the panel
 static uint64_t s_last_touch_us;
 
@@ -269,6 +274,10 @@ int main(void)
         }
         flush_log();
         rs485_stats(now);
+
+        if (s_display_blank) { // light sleep: any interrupt or the timeout wakes the core
+            best_effort_wfe_or_timeout(make_timeout_time_us(BLANK_WAKE_INTERVAL_US));
+        }
     }
 }
 
@@ -421,8 +430,10 @@ static void touch_poll(bsp_touch_interface_t *touch, uint64_t now)
 //     the display stays readable and the buttons keep working;
 //   - PANEL_DISPLAY_BLANK 1: DISPLAY_BLANK_AFTER_US after the fade started, backlight off, then
 //     ST7701 Display Off (the LCD stops driving the pixels, so the liquid crystal is not biased by
-//     a static image either).
-// A wake is immediate, at full brightness.
+//     a static image either) and Sleep In; ST7701_SLEEP_US later the RGB scan-out (PIO + DMA)
+//     stops, and the main loop sleeps between interrupts (power: the TFBUS keeps being answered
+//     from the UART IRQ, the GT911 keeps scanning and its INT wakes the loop).
+// A wake is immediate, at full brightness; from blank it takes ~ST7701_SLEEP_US (Sleep Out).
 // ---------------------------------------------------------------------------------------------
 
 // Any finger on the display: restarts the countdown and wakes the display. On a blank display the
@@ -460,6 +471,10 @@ static void display_poll(uint64_t now)
     uint64_t asleep_us = now - s_asleep_since_us;
     if (PANEL_DISPLAY_BLANK && asleep_us >= DISPLAY_BLANK_AFTER_US) {
         display_set_blank(true);
+        if (!s_scanout_stopped && now - s_blank_since_us >= ST7701_SLEEP_US) {
+            s_scanout_stopped = true;
+            pio_rgb_set_scanout_enabled(false);
+        }
         return;
     }
     uint64_t fade_us = asleep_us < DISPLAY_FADE_US ? asleep_us : DISPLAY_FADE_US;
@@ -471,7 +486,10 @@ static void display_poll(uint64_t now)
 // ~2 ms per command byte.
 void bsp_st7701_spi_tx_cmd(bsp_st7701_cmd_t *cmds, size_t cmd_len);
 
-// Blank: backlight off first, then Display Off; unblank: Display On (the caller sets the backlight).
+// Blank: backlight off first, then Display Off + Sleep In (display_poll stops the scan-out
+// ST7701_SLEEP_US later). Unblank: scan-out running again, Sleep Out (at least ST7701_SLEEP_US
+// after Sleep In), ST7701_SLEEP_US, Display On; the caller sets the backlight. The UART IRQ keeps
+// answering the TFBUS while this blocks.
 static void display_set_blank(bool blank)
 {
     if (blank == s_display_blank) {
@@ -480,9 +498,22 @@ static void display_set_blank(bool blank)
     s_display_blank = blank;
     if (blank) {
         backlight_set(0);
+        bsp_st7701_cmd_t blank_commands[] = {{.reg = 0x28}, {.reg = 0x10}}; // Display Off, Sleep In
+        bsp_st7701_spi_tx_cmd(blank_commands, 2);
+        s_blank_since_us = time_us_64();
+        return;
     }
-    bsp_st7701_cmd_t display_command = {.reg = blank ? 0x28 : 0x29}; // Display Off / Display On
-    bsp_st7701_spi_tx_cmd(&display_command, 1);
+    if (s_scanout_stopped) {
+        s_scanout_stopped = false;
+        pio_rgb_set_scanout_enabled(true);
+    }
+    uint64_t since_sleep_in_us = time_us_64() - s_blank_since_us;
+    if (since_sleep_in_us < ST7701_SLEEP_US) {
+        sleep_us(ST7701_SLEEP_US - since_sleep_in_us);
+    }
+    bsp_st7701_cmd_t unblank_commands[] = {{.reg = 0x11, .delay_ms = ST7701_SLEEP_US / 1000}, // Sleep Out
+                                           {.reg = 0x29}};                                   // Display On
+    bsp_st7701_spi_tx_cmd(unblank_commands, 2);
 }
 
 static void backlight_set(uint8_t percent)
