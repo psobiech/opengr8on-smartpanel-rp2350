@@ -31,6 +31,7 @@ jobs:
       - uses: actions/checkout@v7
         with:
           fetch-depth: 0 # git describe for VERSION
+          submodules: true # external/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico: SD card (button icons)
 
       - name: Install toolchain
         run: |
