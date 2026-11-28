@@ -155,6 +155,7 @@ static finger_t s_fingers[FINGERS];
 static void set_cpu_clock(uint32_t mhz);
 static void buzzer_init(void);
 static uint32_t panel_sn(void);
+static void rs485_release_bus(void);
 static void rs485_init(void);
 static void touch_poll(bsp_touch_interface_t *touch, uint64_t now);
 static bool display_touch_filter(bool touched, uint64_t now);
@@ -178,6 +179,7 @@ static void on_log(const char *message, void *context);
 
 int main(void)
 {
+    rs485_release_bus(); // first: the display / touch / IMU init below takes ~1.3 s
     stdio_init_all();
     set_cpu_clock(240);
     bsp_i2c_init();
@@ -299,6 +301,21 @@ static uint32_t panel_sn(void)
         hash = (hash ^ board_id.id[i]) * 16777619u;
     }
     return PANEL_SN_PREFIX | 0xf000 | (hash & 0x0fff);
+}
+
+/**
+ * @brief Hold RS485 TX high (idle) until rs485_init() hands the pin to the UART.
+ *
+ * After reset the pin is an input with the default pull-down. The auto-direction transceiver
+ * drives the bus while TX is low, so the bus stays jammed until the UART takes the pin. Real
+ * Grenton modules drop their address on that (the CLU has to re-address all of them), and junk
+ * bytes reach the bus when the UART takes over.
+ */
+static void rs485_release_bus(void)
+{
+    gpio_init(RS485_TX_PIN);
+    gpio_put(RS485_TX_PIN, 1);
+    gpio_set_dir(RS485_TX_PIN, GPIO_OUT);
 }
 
 static void rs485_init(void)

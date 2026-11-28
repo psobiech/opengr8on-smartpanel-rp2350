@@ -195,6 +195,12 @@ pokazuje więcej niż temperatura pokoju. Kalibracja: korekta = temperatura poko
 115200 8N1. Odpowiedź wychodzi 800 µs po zapytaniu — szybsza kolidowała z ESP32 CLU, które jeszcze
 trzymało DE, i pierwsze bajty ginęły.
 
+Pin TX jest ustawiany w stan wysoki jako pierwsza rzecz w `main()`. Po resecie ma domyślny
+pull-down, a transceiver z automatycznym kierunkiem nadaje, gdy TX jest nisko. Do czasu
+inicjalizacji UART (ok. 1,3 s, po wyświetlaczu i dotyku) magistrala była zablokowana, a
+prawdziwe moduły Grenton traciły wtedy adres. Podczas bootromu i trybu BOOTSEL (wgrywanie przez
+USB) pin nadal jest nisko: pomaga tylko rezystor pull-up (4,7–10 kΩ do 3V3) na TX transceivera.
+
 ### Dodanie panelu do CLU
 
 Panel przedstawia się jako hwType `0x03`, fwType `3`, fwApiVer `4`. Numer seryjny i linia do OM.LUA
