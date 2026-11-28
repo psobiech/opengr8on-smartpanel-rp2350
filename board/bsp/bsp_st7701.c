@@ -216,12 +216,13 @@ static void bsp_st7701_init(void)
     // printf("pio_rgb_init framebuffer1:0x%x\r\n", rgb_info->framebuffer1);
     // printf("pio_rgb_init framebuffer2:0x%x\r\n", rgb_info->framebuffer2);
 
-    if (rgb_info->framebuffer1 == NULL)
+    // opengr8on: line table mode has no full framebuffer (its rows are the caller's)
+    if (rgb_info->framebuffer1 == NULL && rgb_info->line_table == NULL)
     {
         printf("Error: Framebuffer1 is NULL\r\n");
         return;
     }
-    for (size_t i = 0; i < rgb_info->width * rgb_info->height; i++)
+    for (size_t i = 0; rgb_info->framebuffer1 && i < rgb_info->width * rgb_info->height; i++)
     {
         rgb_info->framebuffer1[i] = 0xffff;
     }

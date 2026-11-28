@@ -7,6 +7,8 @@
 //                    of the replica UI; while the display is blank the core sleeps (WFE) between
 //                    interrupts (UART RX, GT911 INT, timers), at least every BLANK_WAKE_INTERVAL_US.
 //   QMI8658 tap engine -> a knock on the panel wakes the display like a touch (see tap_poll).
+//   core1         -> the rows through the OLED dot area, composed per scan line (src/scanout.c).
+//   SD card       -> button icons (IconA / IconB), loaded from the main loop (src/icons.c).
 #include <math.h>
 #include <stdarg.h>
 #include <stdio.h>
@@ -23,11 +25,13 @@
 #include "hardware/pwm.h"
 #include "hardware/sync.h"
 #include "hardware/uart.h"
+#include "icons.h"
 #include "panel_core.h"
 #include "pico/stdlib.h"
 #include "pico/unique_id.h"
 #include "pio_rgb.h"
 
+#include "scanout.h"
 #include "ui.h"
 
 #define LCD_W 480
@@ -95,7 +99,6 @@ _Static_assert(PANEL_DISPLAY_DIM_BRIGHTNESS >= 0 && PANEL_DISPLAY_DIM_BRIGHTNESS
     } while (0)
 
 static panel_t s_panel;
-static uint16_t *s_framebuffer;
 
 // Logging: the core may log from the UART IRQ; lines are printed from the main loop.
 #define LOG_LINES 8
@@ -132,12 +135,11 @@ static bool s_scanout_stopped;    // RGB scan-out (PIO + DMA) stopped while blan
 static bool s_wake_touch;         // the touch (or the tap) that woke a blank display: not passed to the panel
 static uint64_t s_last_touch_us;
 
-// Pixel shift (see pixel_shift_poll): the framebuffer has FRAMEBUFFER_MARGIN pixels of black
-// before and after it, so the shifted scan-out never reads outside the allocation.
-#define PIXEL_SHIFT_PX        2
+// Pixel shift (see pixel_shift_poll): the framebuffer has FRAMEBUFFER_MARGIN pixels before and
+// after it, so a horizontally shifted row never reads outside the allocation.
+#define PIXEL_SHIFT_PX        SCANOUT_SHIFT_MAX
 #define PIXEL_SHIFT_PERIOD_US 120000000ull // at most one 1 px step every 2 min, only while dimmed / blank
-#define FRAMEBUFFER_MARGIN    (PIXEL_SHIFT_PX * LCD_W + PIXEL_SHIFT_PX)
-static pio_rgb_info_t *s_rgb_info;
+#define FRAMEBUFFER_MARGIN    PIXEL_SHIFT_PX
 
 // View: press highlight fade-out after release
 #define GLOW_FADE_US 260000
@@ -194,6 +196,7 @@ static void buzzer_poll(uint64_t now);
 static void snapshot(ui_view_t *view, uint64_t now);
 static void flush_log(void);
 static void rs485_stats(uint64_t now);
+static void scanout_stats(uint64_t now);
 static void rs485_irq(void);
 static void on_tx(const uint8_t *frame, size_t frame_length, void *context);
 static int64_t tx_alarm(alarm_id_t id, void *user_data);
@@ -206,34 +209,33 @@ int main(void)
     set_cpu_clock(240);
     bsp_i2c_init();
 
-    // display (same setup as the vendor examples: one 480x480 RGB565 framebuffer in SRAM)
+    // display: the UI framebuffer without the OLED dot area (313 KB; core1 composes the rows through
+    // it per scan line), sent by the vendor PIO RGB scan-out in line table mode (src/scanout.c)
+    size_t framebuffer_allocation_bytes = (UI_FRAMEBUFFER_PIXELS + 2 * FRAMEBUFFER_MARGIN) * sizeof(uint16_t);
+    uint16_t *framebuffer_allocation = malloc(framebuffer_allocation_bytes);
+    if (!framebuffer_allocation) {
+        panic("framebuffer: out of memory (%u bytes)", (unsigned)framebuffer_allocation_bytes);
+    }
+    memset(framebuffer_allocation, 0, framebuffer_allocation_bytes);
+    ui_init(framebuffer_allocation + FRAMEBUFFER_MARGIN);
     static pio_rgb_info_t rgb_info;
     rgb_info.width = LCD_W;
     rgb_info.height = LCD_H;
     rgb_info.transfer_size = LCD_W * 80;
     rgb_info.pclk_freq = BSP_LCD_PCLK_FREQ;
-    rgb_info.mode.double_buffer = false;
-    rgb_info.mode.enabled_transfer = false;
-    rgb_info.mode.enabled_psram = false;
-    size_t framebuffer_allocation_bytes = (LCD_W * LCD_H + 2 * FRAMEBUFFER_MARGIN) * sizeof(uint16_t);
-    uint16_t *framebuffer_allocation = malloc(framebuffer_allocation_bytes);
-    if (!framebuffer_allocation) { // 464 KB of 520 KB SRAM: fails if .bss/.data grow too much
-        panic("framebuffer: out of memory (%u bytes)", (unsigned)framebuffer_allocation_bytes);
-    }
-    memset(framebuffer_allocation, 0, framebuffer_allocation_bytes); // the margins stay black
-    rgb_info.framebuffer1 = framebuffer_allocation + FRAMEBUFFER_MARGIN;
-    rgb_info.dma_flush_done_cb = NULL;
-    s_framebuffer = rgb_info.framebuffer1;
-    s_rgb_info = &rgb_info;
+    scanout_init(&rgb_info);
     bsp_display_info_t display_info = {.width = LCD_W, .height = LCD_H, .brightness = PANEL_DISPLAY_BRIGHTNESS,
                                        .user_data = &rgb_info};
     bsp_display_new_st7701(&s_display, &display_info);
     s_display->init();
+    scanout_start();
 
     bsp_touch_interface_t *touch;
     bsp_touch_info_t touch_info = {.width = LCD_W, .height = LCD_H, .rotation = 0};
     bsp_touch_new_gt911(&touch, &touch_info);
     touch->init();
+
+    icons_init(); // after the display init (DMA channel 0)
 
     s_have_imu = bsp_qmi8658_init() != 0;
     if (!s_have_imu) {
@@ -257,7 +259,6 @@ int main(void)
     printf("OM.LUA: mm_%lu = OBJECT:new(2, 0x%08lx, 0x03, \"%08lx\")\n", (unsigned long)s_panel.serial_number,
            (unsigned long)s_panel.serial_number, (unsigned long)s_panel.serial_number);
 
-    ui_init(s_framebuffer);
     static ui_view_t view;
     uint64_t next_temperature = 0, next_touch = 0, next_tap = 0, next_render = 0;
 
@@ -300,8 +301,10 @@ int main(void)
             snapshot(&view, now);
             ui_render(&view); // redraws only regions that changed
         }
+        icons_poll();
         flush_log();
         rs485_stats(now);
+        scanout_stats(now);
 
         if (s_display_blank) { // light sleep: any interrupt or the timeout wakes the core
             best_effort_wfe_or_timeout(make_timeout_time_us(BLANK_WAKE_INTERVAL_US));
@@ -520,7 +523,7 @@ static void display_poll(uint64_t now)
         display_set_blank(true);
         if (!s_scanout_stopped && now - s_blank_since_us >= ST7701_SLEEP_US) {
             s_scanout_stopped = true;
-            pio_rgb_set_scanout_enabled(false);
+            scanout_set_enabled(false);
         }
         return;
     }
@@ -552,7 +555,7 @@ static void display_set_blank(bool blank)
     }
     if (s_scanout_stopped) {
         s_scanout_stopped = false;
-        pio_rgb_set_scanout_enabled(true);
+        scanout_set_enabled(true);
     }
     uint64_t since_sleep_in_us = time_us_64() - s_blank_since_us;
     if (since_sleep_in_us < ST7701_SLEEP_US) {
@@ -573,15 +576,16 @@ static void backlight_set(uint8_t percent)
 
 // ---------------------------------------------------------------------------------------------
 // Pixel shift (LCD image retention of static edges: corner brackets, status and page dots). The
-// scan-out DMA re-reads its start address (_framebuffer) at the end of every frame, so starting it
-// dy rows + dx pixels away from the framebuffer moves the whole picture on the glass, without a
-// redraw and in whole frames (no tearing). The rendering, the touch mapping and the core are not
+// scan-out sends every row from its own address (line table, src/scanout.c), so a table whose rows
+// start dy rows + dx pixels away moves the whole picture on the glass, without a redraw and in
+// whole frames (no tearing). The rendering, the touch mapping and the core are not
 // affected. A step is taken at most every PIXEL_SHIFT_PERIOD_US and only while the display is
 // dimmed or blank (display_poll), never while someone looks at it at full brightness: a step due
 // while awake waits for the next dimming. A panel kept awake all the time does not move.
 // The start walks the perimeter of a +-PIXEL_SHIFT_PX square, 1 px per step (invisible at
-// ~0.15 mm per pixel). A vertical shift shows up to PIXEL_SHIFT_PX black rows from the margin at
-// the top or bottom; a horizontal one wraps the neighbouring row's edge pixels (background).
+// ~0.15 mm per pixel). A vertical shift shows up to PIXEL_SHIFT_PX black rows at the top or
+// bottom; a horizontal one shows the neighbouring stored pixels (background) or, through the OLED
+// rows, repeats the row's edge pixels.
 // ---------------------------------------------------------------------------------------------
 static void pixel_shift_poll(uint64_t now)
 {
@@ -597,7 +601,7 @@ static void pixel_shift_poll(uint64_t now)
     next_shift_us = now + PIXEL_SHIFT_PERIOD_US;
     const int8_t *shift = k_shift_path[path_index];
     path_index = (path_index + 1) % (sizeof k_shift_path / sizeof k_shift_path[0]);
-    s_rgb_info->_framebuffer = s_framebuffer + shift[1] * LCD_W + shift[0]; // a pointer store: atomic
+    scanout_set_shift(shift[0], shift[1]);
 }
 
 static void finger_press(finger_t *finger)
@@ -710,7 +714,7 @@ static void snapshot(ui_view_t *view, uint64_t now)
 {
     uint32_t saved_interrupts = save_and_disable_interrupts();
     const panel_t *panel = &s_panel;
-    memcpy(view->oled, panel->oled_shown, sizeof view->oled);
+    scanout_set_oled(panel->oled_shown);
     view->page = panel->page;
     view->pages = PANEL_PAGES;
     view->address = panel->address;
@@ -720,16 +724,23 @@ static void snapshot(ui_view_t *view, uint64_t now)
     view->has_temperature = panel->has_temperature;
     view->temperature_deci = (int16_t)(panel->temperature_centi / 10);
     bool down[PANEL_SLOTS];
+    char labels[PANEL_SLOTS][17], icon_names[PANEL_SLOTS][17];
     for (int i = 0; i < PANEL_SLOTS; i++) {
         int button = panel_slot_button(panel, i);
         ui_slot_t *slot_view = &view->slot[i];
         down[i] = panel->slot_down[i];
         slot_view->led = panel_slot_led(panel, i, now);
         slot_view->locate = panel->buttons_led_mode == 1;
-        const char *name = panel->label[button][0] ? panel->label[button] : panel->icon_a[button];
-        panel_to_ascii(slot_view->label, sizeof slot_view->label, name); // unconfigured button: no label
+        memcpy(labels[i], panel->label[button], sizeof labels[i]);
+        memcpy(icon_names[i], panel_slot_icon(panel, i), sizeof icon_names[i]);
     }
     restore_interrupts(saved_interrupts);
+    for (int i = 0; i < PANEL_SLOTS; i++) {
+        // the icon (IconA / IconB by state) in the middle of the button, the Label in its corner
+        ui_slot_t *slot_view = &view->slot[i];
+        slot_view->icon = icons_find(icon_names[i]);
+        panel_to_ascii(slot_view->label, sizeof slot_view->label, labels[i]);
+    }
     for (int i = 0; i < PANEL_SLOTS; i++) {
         if (down[i]) {
             s_release_us[i] = now;
@@ -776,6 +787,23 @@ static void rs485_stats(uint64_t now)
            (unsigned long)s_panel.frames_bad, (unsigned long)s_panel.polls, (unsigned long)s_tx_frames,
            (unsigned)s_tx_queue_length, s_tx_armed, s_panel.address, last_rx[0], last_rx[1], last_rx[2], last_rx[3],
            last_rx[4], last_rx[5], last_rx[6], last_rx[7]);
+}
+
+// Core1 composing an OLED row too late shows the row's previous content for a frame: reported
+// (every 5 s at most) so a scan-out timing problem is visible on USB.
+static void scanout_stats(uint64_t now)
+{
+    static uint64_t next_us;
+    static uint32_t reported_late_lines;
+    if (now < next_us) {
+        return;
+    }
+    next_us = now + 5000000;
+    uint32_t late_lines = scanout_late_lines();
+    if (late_lines != reported_late_lines) {
+        reported_late_lines = late_lines;
+        printf("[scanout] %lu OLED rows composed late since boot\n", (unsigned long)late_lines);
+    }
 }
 
 // ---------------------------------------------------------------------------------------------

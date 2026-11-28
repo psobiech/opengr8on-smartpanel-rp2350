@@ -23,8 +23,12 @@ target_compile_options(bsp PRIVATE -w) # vendor code, unmodified
 target_link_libraries(bsp PUBLIC pico_stdlib hardware_spi hardware_i2c hardware_pwm hardware_dma
                       hardware_pio hardware_irq)
 
-add_executable(smartpanel src/main.c src/ui.c core/panel_core.c)
-target_include_directories(smartpanel PRIVATE core src)
+# SD card (button icons): carlk3's no-OS-FatFS (FatFS + SDIO driver), the version Waveshare's demo uses
+add_subdirectory(external/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico/src no-OS-FatFS)
+
+add_executable(smartpanel src/main.c src/ui.c src/scanout.c src/icons.c src/sd_hw_config.c core/panel_core.c
+               core/png_icon.c external/puff/puff.c)
+target_include_directories(smartpanel PRIVATE core src external/puff)
 target_compile_options(smartpanel PRIVATE -Wall -Wextra -Wno-unused-parameter)
 set(PANEL_SN "0" CACHE STRING "Serial number (0 = derive 0x0f05fxxx from the flash unique ID)")
 set(PANEL_DISPLAY_BRIGHTNESS "70" CACHE STRING "Backlight while the display is awake, percent (up to 100)")
@@ -37,9 +41,10 @@ target_compile_definitions(smartpanel PRIVATE PANEL_SN=${PANEL_SN} PANEL_DISPLAY
                            PANEL_DISPLAY_DIM_BRIGHTNESS=${PANEL_DISPLAY_DIM_BRIGHTNESS}
                            PANEL_DISPLAY_BLANK=$<BOOL:${PANEL_DISPLAY_BLANK}> PANEL_TAP_WAKE=$<BOOL:${PANEL_TAP_WAKE}>
                            PANEL_TAP_PEAK_G2=${PANEL_TAP_PEAK_G2}f PANEL_TAP_QUIET_G2=${PANEL_TAP_QUIET_G2}f
-                           PICO_EMBED_XIP_SETUP=1)
-target_link_libraries(smartpanel pico_stdlib pico_unique_id hardware_uart hardware_pwm hardware_adc
-                      hardware_irq hardware_sync bsp m)
+                           PICO_EMBED_XIP_SETUP=1
+                           PICO_STACK_SIZE=0x1000) # all of SCRATCH_Y: the PNG inflate (puff) needs ~1.5 KB
+target_link_libraries(smartpanel pico_stdlib pico_unique_id pico_multicore hardware_uart hardware_pwm hardware_adc
+                      hardware_irq hardware_sync hardware_dma no-OS-FatFS-SD-SDIO-SPI-RPi-Pico bsp m)
 pico_enable_stdio_usb(smartpanel 1)
 pico_enable_stdio_uart(smartpanel 0)
 pico_add_extra_outputs(smartpanel)

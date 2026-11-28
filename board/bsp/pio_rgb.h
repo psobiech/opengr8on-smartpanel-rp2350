@@ -18,6 +18,12 @@ typedef struct  {
     size_t transfer_size;
     size_t pclk_freq;
     channel_irq_callback_t dma_flush_done_cb;
+    // opengr8on: line table mode (framebuffer1 / the modes below unused): `height` read addresses,
+    // one per screen row, then NULL. Each frame the DMA sends `width` pixels from every address in
+    // turn (a control DMA channel feeds them to the pixel channel). dma_flush_done_cb runs at every
+    // frame start, after the frame was started from line_table (DMA IRQ). Replace the table with
+    // pio_rgb_set_line_table().
+    const uint16_t *const *line_table;
     struct {
         bool double_buffer;
         bool enabled_transfer;
@@ -74,6 +80,18 @@ void pio_rgb_update_framebuffer(uint16_t x1, uint16_t y1, uint16_t x2, uint16_t 
  * Restart begins with a new frame.
  */
 void pio_rgb_set_scanout_enabled(bool enabled);
+
+/**
+ * opengr8on: line table mode. The table the next frame starts from (call with interrupts disabled
+ * when the DMA IRQ could start a frame in between).
+ */
+void pio_rgb_set_line_table(const uint16_t *const *line_table);
+
+/**
+ * opengr8on: line table mode. Rows of the current frame whose DMA has started (0..height): row
+ * n - 1 is being sent, rows below it have been read. Safe to call from the other core.
+ */
+int pio_rgb_lines_started(void);
 
 
 #ifdef __cplusplus

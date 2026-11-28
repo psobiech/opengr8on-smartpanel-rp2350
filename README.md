@@ -45,12 +45,14 @@ Struktura:
 
 | Katalog | Zawartość |
 |---|---|
-| `core/` | logika panelu i protokół TFBUS (`panel_core.c`), czyste C bez zależności od sprzętu |
-| `src/` | firmware: RS485, dotyk, buzzer, temperatura (`main.c`), UI (`ui.c`), fonty |
+| `core/` | logika panelu i protokół TFBUS (`panel_core.c`), dekoder PNG ikon (`png_icon.c`), czyste C bez zależności od sprzętu |
+| `src/` | firmware: RS485, dotyk, buzzer, temperatura (`main.c`), UI (`ui.c`), wysyłanie obrazu (`scanout.c`), fonty |
 | `board/` | definicja płytki i sterowniki LCD/dotyku/IMU skopiowane z demo Waveshare (`board/README.md`) |
 | `test/host/` | testy i podgląd UI na PC |
-| `tools/` | generator fontów (`gen_font.py`) |
+| `tools/` | generator fontów (`gen_font.py`) i plików PNG do testów (`gen_png_fixtures.py`) |
 | `external/clu-esp32` | submoduł; testy używają z niego parsera ramek CLU |
+| `external/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico` | submoduł; karta SD i FatFS (ikony przycisków) |
+| `external/puff` | dekompresor deflate z zlib (dekoder PNG ikon, `core/png_icon.c`) |
 
 ## Kompletność
 
@@ -78,8 +80,9 @@ Brakuje / nie zostało rozpoznane:
   Object_n_Name: pole 04 slot n; sprawdzone na prawdziwym CLU), ale prawdziwy panel ich nie
   pokazał, więc panel je pomija.
   Podkomenda `0x0a` w `0x30` to etykieta przycisku (SetLabel; potwierdzone przechwytem) — widoczna
-  tylko w rogu przycisku, nie na OLED-zie. Założenie: `0x00` to IconA (pokazywana na OLED-zie jako
-  tekst — brak ikon BMP).
+  tylko w rogu przycisku, nie na OLED-zie. Założenie (z kolejności ramek inicjalizacji,
+  niepotwierdzone przechwytem z niepustą ikoną): `0x00` to IconA, `0x01` to IconB — rysowane na
+  przycisku, zob. [Ikony przycisków](#ikony-przycisków).
 - **Polecenia rysowania** ClearScreen (`0x04`), DrawLine (`0x06 [x y xe ye kolor]`), DrawPoint
   (`0x07 [x y kolor]`), DrawIcon (`0x08 [x y plik(16) 0]`), DrawBox (`0x1b [x y w h kolor]`),
   ShowButtons (`0x03`) — format ramek znany (sterownik CLU je wysyła), panel ich jeszcze nie rysuje.
@@ -113,6 +116,7 @@ Brakuje / nie zostało rozpoznane:
 ## Co ma ponad oryginał
 
 - Etykiety przycisków i stan diod widoczne na ekranie przy każdym przycisku.
+- Kolorowe ikony PNG z przezroczystością na przyciskach (IconA / IconB z karty SD).
 - Multi-touch: każda ćwiartka to osobny przycisk, do 5 palców jednocześnie (śledzone po track id
   GT911; palec zostaje przy ćwiartce, w której zaczął). Przeciągnięcie palca (>24 px) nie jest
   naciśnięciem: naciśnięcie trafia do CLU dopiero po 80 ms bez ruchu albo przy puszczeniu.
@@ -197,7 +201,12 @@ go trzaśnięcie drzwiami. Kroków w pokoju IMU nie wykrywa: drgania ściany są
 Obraz przesuwa się też o 1 piksel po obwodzie kwadratu ±2 px (najwyżej co 2 min, 16 pozycji), żeby
 ostre statyczne krawędzie (narożniki, kropki stanu i stron) nie utrwalały się w jednym miejscu —
 tylko gdy ekran jest przyciemniony lub wygaszony, nigdy przy pełnej jasności. Przesuwany jest tylko
-początek odczytu DMA, bez przerysowania; przy brzegu może być widoczny pasek czerni do 2 px.
+tablica adresów wierszy DMA, bez przerysowania; przy brzegu może być widoczny pasek czerni do 2 px.
+
+Punktów „OLED-a” nie ma w buforze ramki (313 KB zamiast 461 KB): drugi rdzeń (core1) składa każdy
+wiersz przechodzący przez OLED z jego 1-bitowej zawartości tuż przed wysłaniem go do LCD
+(`src/scanout.c`), więc zmiana treści OLED-a nigdy nie rwie obrazu. Wiersz złożony za późno pokazuje
+przez jedną klatkę starą treść; ich liczba jest wypisywana na USB (`[scanout] … OLED rows composed late`).
 
 Wyliczane numery seryjne leżą w zakresie `0x0f05f000..0x0f05ffff`, z dala od zakresu, w którym
 widziano prawdziwe panele (`0x0f057bxx`).
@@ -207,6 +216,25 @@ na sekundę. Odrzucane są nieudane transfery I2C i wartości spoza -30..85 °C;
 5 ostatnich poprawnych próbek, obciętą do 0 °C. Układ leży obok RP2350 i podświetlenia LCD, więc
 pokazuje więcej niż temperatura pokoju. Kalibracja: korekta = temperatura pokoju − wartość
 `[temp] raw` wypisywana na USB co 30 s.
+
+### Ikony przycisków
+
+IconA / IconB z `PANEL_BUTTON` (`SetIconA` / `SetIconB`, nazwa pliku do 9 znaków) to pliki PNG na
+karcie SD (FAT32 / exFAT) w katalogu `icons`: ikona `lampa` → `/icons/lampa.png`, `~lampa` → ten sam
+plik w negatywie (odwrócone kolory, przezroczystość bez zmian). Ikona jest rysowana pośrodku
+przycisku (w jego rogu ekranu, obok etykiety), w kolorze i z przezroczystością:
+
+- przycisk bistabilny włączony (`Value` = 1): IconB, jeśli ustawiona, w każdym innym stanie IconA,
+- obraz do 96×96 px, wyświetlany najwyżej 64×64 (większe zmniejszane z zachowaniem proporcji),
+  dowolny typ koloru i głębia PNG, bez przeplotu (interlace),
+- etykieta (Label) nie zależy od ikony; brakujący plik po prostu nie jest rysowany (przyczyna na USB).
+
+Karta jest montowana przy starcie, a pliki czytane przy pierwszym użyciu ikony (kilka ms); w
+pamięci mieści się 5 ikon naraz (wymieniane te dawno niewidoczne). Ikona widoczna na ekranie, której
+nie udało się wczytać (brak karty, brak pliku, błąd odczytu), jest próbowana ponownie co 30 s —
+także montowanie karty (bez karty blokuje pętlę do ~1 s). Zmieniony plik już wczytanej ikony pojawi
+się po restarcie. Na USB: `[icons] 0:/icons/lampa.png: 48x48` albo przyczyna błędu. OLED-a ikony nie
+zmieniają (widok przycisków na OLED-zie jest pusty).
 
 ### Magistrala
 
@@ -244,7 +272,8 @@ są wypisywane przy starcie na USB i na ekranie.
 ## Testy
 
 Wymagania: `gcc` lub `clang` z AddressSanitizer/UBSan, `make`; do podglądu dodatkowo Python 3 z
-Pillow. Submoduł `external/clu-esp32` musi być pobrany.
+Pillow. Submoduł `external/clu-esp32` musi być pobrany. Pliki PNG do testów (`test/host/fixtures`)
+są w repo; generuje je `python3 tools/gen_png_fixtures.py` (Pillow).
 
 ```bash
 make -C test/host test                     # testy rdzenia
@@ -256,7 +285,8 @@ Test sprawdza na hoście:
 
 - wykrywanie i bajty statusu względem odpowiedzi prawdziwego panelu,
 - ACK na sekwencję inicjalizacji panelu z prawdziwego CLU,
-- dotyk → zdarzenia przycisków, diody, PrintText / Draw / Beep,
+- dotyk → zdarzenia przycisków, diody, PrintText / Draw / Beep, IconA / IconB według stanu,
+- dekoder PNG ikon: typy koloru, głębie, filtry wierszy, przezroczystość, zmniejszanie, błędne pliki,
 - że każda wysłana ramka przechodzi przez parser ramek ESP32 CLU.
 
 Odtworzenie zrzutu podaje ~44 tys. prawdziwych ramek z magistrali (wszystkie moduły) i sprawdza, że
@@ -270,6 +300,9 @@ zewnętrznych wymienionych niżej.
 - `board/` — definicja płytki i sterowniki skopiowane z pakietu demo Waveshare; obowiązują ich
   licencje (szczegóły w [board/README.md](board/README.md)).
 - `src/font_aa.h` — font Noto Sans, [SIL Open Font License 1.1](https://openfontlicense.org).
+- `external/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico` — sterownik karty SD i FatFS (Apache 2.0, FatFS:
+  licencja BSD-1), submoduł.
+- `external/puff` — dekompresor deflate z zlib (`contrib/puff`, v1.3.1; licencja zlib).
 
 Opisy protokołów, na których opiera się firmware, pochodzą z
 [opengr8on-node](https://github.com/psobiech/opengr8on-node) (dokumentacja: CC BY-SA 4.0).
@@ -314,6 +347,9 @@ listed below.
 - `board/` — board definition and drivers copied from the Waveshare demo package; their own licences
   apply (see [board/README.md](board/README.md)).
 - `src/font_aa.h` — Noto Sans font, [SIL Open Font License 1.1](https://openfontlicense.org).
+- `external/no-OS-FatFS-SD-SDIO-SPI-RPi-Pico` — SD card driver and FatFS (Apache 2.0, FatFS: BSD-1
+  licence), submodule.
+- `external/puff` — zlib's deflate decoder (`contrib/puff`, v1.3.1; zlib licence).
 
 Protocol descriptions the firmware is based on come from
 [opengr8on-node](https://github.com/psobiech/opengr8on-node) (documentation: CC BY-SA 4.0).

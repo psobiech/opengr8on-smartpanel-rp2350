@@ -455,6 +455,43 @@ int main(int argc, char **argv)
               strcmp(panel->label[0], "aaaa") == 0 && !oled_lit);
     }
 
+    // ---- IconA / IconB (0x30 [button, 00 / 01, name]): shown on the button by state, not on the OLED ----
+    {
+        uint8_t icon_a_block[22] = {0x01, 0x00, 'l', 'a', 'm', 'p', '_', 'o', 'f', 'f'};
+        uint8_t icon_b_block[22] = {0x01, 0x01, 'l', 'a', 'm', 'p', '_', 'o', 'n'};
+        frame(panel, 0x12, 0x30, icon_a_block, sizeof icon_a_block);
+        frame(panel, 0x12, 0x30, icon_b_block, sizeof icon_b_block);
+        bool oled_lit = false;
+        for (int y = 0; y < OLED_H; y++) {
+            for (int x = 0; x < OLED_W; x++) {
+                oled_lit |= panel_oled_pixel(panel, x, y);
+            }
+        }
+        check("IconA / IconB stored, nothing drawn on the OLED",
+              strcmp(panel->icon_a[1], "lamp_off") == 0 && strcmp(panel->icon_b[1], "lamp_on") == 0 && !oled_lit);
+        check("monostable, released: IconA", strcmp(panel_slot_icon(panel, 1), "lamp_off") == 0);
+        panel_touch(panel, 1, true, now);
+        check("monostable, held (Value 1): still IconA", strcmp(panel_slot_icon(panel, 1), "lamp_off") == 0);
+        panel_touch(panel, 1, false, now);
+        frame(panel, 0x12, 0x17, (const uint8_t[]){0x02, 0x00, BUTTON_MODE_BISTABLE}, 3); // button 1
+        panel_touch(panel, 1, true, now);
+        panel_touch(panel, 1, false, now);
+        check("bistable ON: IconB", strcmp(panel_slot_icon(panel, 1), "lamp_on") == 0);
+        panel_touch(panel, 1, true, now);
+        panel_touch(panel, 1, false, now);
+        check("bistable OFF: IconA", strcmp(panel_slot_icon(panel, 1), "lamp_off") == 0);
+        icon_b_block[2] = 0; // IconB cleared
+        frame(panel, 0x12, 0x30, icon_b_block, sizeof icon_b_block);
+        panel_touch(panel, 1, true, now);
+        panel_touch(panel, 1, false, now);
+        check("bistable ON without IconB: IconA", strcmp(panel_slot_icon(panel, 1), "lamp_off") == 0);
+        frame(panel, 0x12, 0x17, (const uint8_t[]){0x02, 0x00, BUTTON_MODE_MONOSTABLE}, 3);
+        for (int i = 0; i < 8; i++) { // report every queued Value change before the next checks
+            poll(panel, 0x12);
+        }
+        tx_reset();
+    }
+
     // ---- LEDs ----
     frame(panel, 0x12, 0x18, (const uint8_t[]){0x08, 0x00, 0x10}, 3);        // RedLedSwitchOn btn 3 (mask 0x08)
     check("RedLedSwitchOn", panel_slot_led(panel, 3, now) == LEDS_RED);

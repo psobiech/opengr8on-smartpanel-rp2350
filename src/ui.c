@@ -6,6 +6,13 @@
 
 #include "font_aa.h"
 
+#if PICO_BUILD
+#include "pico.h" // __not_in_flash: ui_compose_oled_row and its data are used on core1, from RAM
+#else
+#define __not_in_flash(group)
+#define __not_in_flash_func(function_name) function_name
+#endif
+
 // ---------------------------------------------------------------------------------------------
 // Geometry
 // ---------------------------------------------------------------------------------------------
@@ -17,9 +24,9 @@
 #define CORN_IN  14.0f                             // bracket inset from the screen edge
 #define CORN_ARM 26.0f                             // bracket arm length
 
-#define OLED_S   3
-#define OLED_PX  ((UI_W - OLED_W * OLED_S) / 2)   // 48
-#define OLED_PY  144
+#define OLED_S   UI_OLED_SCALE
+#define OLED_PX  UI_OLED_X
+#define OLED_PY  UI_OLED_Y
 #define BEZEL_X  (OLED_PX - 8)
 #define BEZEL_Y  (OLED_PY - 4)
 #define BEZEL_W  (OLED_W * OLED_S + 16)
@@ -29,6 +36,11 @@
 #define DOTS_H   20
 #define STAT_Y   (BEZEL_Y + BEZEL_H + 1)           // region 341..365
 #define STAT_H   24
+
+// Framebuffer layout: rows 0..UI_OLED_Y-1 whole, then per row through the OLED dot area only the
+// pixels left and right of it (SIDES_W), then the rows below it whole.
+#define SIDES_W        (UI_W - UI_OLED_W)
+#define OLED_ROWS_END  (UI_OLED_Y + UI_OLED_H)
 
 // ---------------------------------------------------------------------------------------------
 // Colours (8-bit RGB, packed to RGB565 at the end)
@@ -47,8 +59,9 @@ static const rgb_t BEZEL = RGB(0x04060a), BEZEL_EDGE = RGB(0x1e2a40);
 static const rgb_t PIX_ON = RGB(0xeef7ff), PIX_HALO = RGB(0x5d8fc4), PIX_OFF = RGB(0x0b1019);
 static const rgb_t AMBER = RGB(0xffb547), OFF = RGB(0x46516a);
 
-// RGB565 with 4x4 ordered dithering: smooth gradients without banding.
-static const uint8_t BAYER[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
+// RGB565 with 4x4 ordered dithering: smooth gradients without banding. In RAM: read per scan line
+// on core1 (ui_compose_oled_row).
+static const uint8_t __not_in_flash("ui") BAYER[4][4] = {{0, 8, 2, 10}, {12, 4, 14, 6}, {3, 11, 1, 9}, {15, 7, 13, 5}};
 
 static uint16_t *s_framebuffer;
 typedef struct {
@@ -63,11 +76,14 @@ static rgb8_t s_bg8[UI_H]; // background gradient per row
 static uint8_t s_mask[MASK_BYTES];
 static int s_mask_w, s_mask_h;
 
+// OLED dot fill [lit][core] (before mixing over the background), set by ui_init
+static rgb_t s_oled_fill[2][2];
+
 static ui_view_t s_prev;
 static bool s_first = true;
 
 static void draw_corner(int slot, const ui_slot_t *corner);
-static void draw_oled(const ui_view_t *view);
+static void draw_bezel(void);
 static void draw_dots(const ui_view_t *view);
 static void draw_status(const ui_view_t *view);
 static void fit(const aa_font_t *font, char *text, int max_width);
@@ -80,6 +96,10 @@ static int rrect_cov(float x, float y, float width, float height, float radius);
 static inline rgb_t mix(rgb_t from, rgb_t target, int amount);
 static inline uint16_t pack_d(rgb_t color, int x, int y);
 static inline int clamp255(float value);
+static uint16_t *row_pixels(int y);
+static uint16_t *pixel_at(int x, int y);
+static inline uint16_t *oled_row_sides(int y);
+static inline rgb_t unpack_rgb565(uint16_t color);
 
 // ---------------------------------------------------------------------------------------------
 // Public API
@@ -95,16 +115,24 @@ void ui_init(uint16_t *framebuffer)
         color = mix(color, RGB(0x16213a), (int)(lift * lift * 70));
         s_bg8[y] = (rgb8_t){(uint8_t)color.red, (uint8_t)color.green, (uint8_t)color.blue};
         for (int x = 0; x < UI_W; x++) {
-            framebuffer[y * UI_W + x] = pack_d(color, x, y);
+            uint16_t *pixel = pixel_at(x, y);
+            if (pixel) {
+                *pixel = pack_d(color, x, y);
+            }
         }
     }
     // faint divider between the top and bottom quadrants, beside the OLED bezel
     for (int x = 0; x < UI_W; x++) {
         if (x < BEZEL_X - 8 || x >= BEZEL_X + BEZEL_W + 8) {
             int edge_distance = x < UI_W / 2 ? x : UI_W - 1 - x; // fade in from the screen edge
-            framebuffer[(UI_H / 2) * UI_W + x] = pack_d(mix(BG(UI_H / 2), TXT_DIM, 40 - edge_distance), x, UI_H / 2);
+            *pixel_at(x, UI_H / 2) = pack_d(mix(BG(UI_H / 2), TXT_DIM, 40 - edge_distance), x, UI_H / 2);
         }
     }
+    // OLED dots: bright 2x2 core and a halo in the gaps when lit, a dark core on the bezel when not
+    s_oled_fill[1][1] = PIX_ON;
+    s_oled_fill[1][0] = mix(BEZEL, PIX_HALO, 110);
+    s_oled_fill[0][1] = PIX_OFF;
+    s_oled_fill[0][0] = mix(BEZEL_EDGE, BEZEL, 255); // the bezel's inner fill
     s_first = true;
 }
 
@@ -115,8 +143,8 @@ void ui_render(const ui_view_t *view)
             draw_corner(slot, &view->slot[slot]);
         }
     }
-    if (s_first || memcmp(view->oled, s_prev.oled, sizeof view->oled) != 0) {
-        draw_oled(view);
+    if (s_first) {
+        draw_bezel();
     }
     if (s_first || view->page != s_prev.page || view->pages != s_prev.pages) {
         draw_dots(view);
@@ -130,6 +158,46 @@ void ui_render(const ui_view_t *view)
     s_first = false;
 }
 
+const uint16_t *ui_row(int y)
+{
+    return row_pixels(y);
+}
+
+void __not_in_flash_func(ui_compose_oled_row)(uint16_t *destination, int y, const uint8_t *oled)
+{
+    const uint16_t *sides = oled_row_sides(y);
+    for (int x = 0; x < UI_OLED_X; x++) {
+        destination[x] = sides[x];
+    }
+    for (int x = UI_OLED_X + UI_OLED_W; x < UI_W; x++) {
+        destination[x] = sides[x - UI_OLED_W];
+    }
+    int oled_offset_y = y - UI_OLED_Y;
+    bool core_row = oled_offset_y % OLED_S < OLED_S - 1;
+    // the pixels of one dot, unlit / lit, for each dither column (x & 3) the dot starts at
+    uint16_t dot_pixels[2][4][OLED_S];
+    rgb_t background = BG(y);
+    for (int lit = 0; lit < 2; lit++) {
+        for (int dither_column = 0; dither_column < 4; dither_column++) {
+            for (int subpixel_x = 0; subpixel_x < OLED_S; subpixel_x++) {
+                bool core = core_row && subpixel_x < OLED_S - 1;
+                dot_pixels[lit][dither_column][subpixel_x] =
+                    pack_d(mix(background, s_oled_fill[lit][core], 255), dither_column + subpixel_x, y);
+            }
+        }
+    }
+    const uint8_t *oled_row = oled + (oled_offset_y / OLED_S) * (OLED_W / 8);
+    uint16_t *dot = destination + UI_OLED_X;
+    for (int column = 0; column < OLED_W; column++) {
+        bool lit = oled_row[column / 8] & (0x80 >> (column & 7));
+        const uint16_t *pixels = dot_pixels[lit][(UI_OLED_X + column * OLED_S) & 3];
+        for (int subpixel_x = 0; subpixel_x < OLED_S; subpixel_x++) {
+            dot[subpixel_x] = pixels[subpixel_x];
+        }
+        dot += OLED_S;
+    }
+}
+
 int ui_hit(int x, int y)
 {
     if (x < 0 || y < 0 || x >= UI_W || y >= UI_H) {
@@ -141,8 +209,9 @@ int ui_hit(int x, int y)
 // ---------------------------------------------------------------------------------------------
 // Regions
 // ---------------------------------------------------------------------------------------------
-// One corner band: background, faint quadrant divider, L bracket, label and LED. Low opacity at
-// rest; the bracket, label and a soft glow from the corner light up while the quadrant is held.
+// One corner band: background, faint quadrant divider, L bracket, label, LED and the button's icon
+// (centred in the band beside the label). Low opacity at rest; the bracket, label and a soft glow
+// from the corner light up while the quadrant is held.
 static void draw_corner(int slot, const ui_slot_t *corner)
 {
     bool right = slot & 1, bottom = slot & 2;
@@ -161,6 +230,13 @@ static void draw_corner(int slot, const ui_slot_t *corner)
     int label_x = (int)(inset + arm + 10); // after the horizontal arm, aligned with it
     mask_text(&font_small, right ? CORN_W - label_x - label_width : label_x, 0, label);
     int label_y = bottom ? CORN_H - (int)inset - font_small.height + 4 : (int)inset - 4;
+    const png_icon_t *icon = corner->icon;
+    int icon_left = 0, icon_top = 0;
+    if (icon) {
+        int free_top = bottom ? 0 : label_y + font_small.height, free_bottom = bottom ? label_y : CORN_H;
+        icon_left = (CORN_W - icon->width) / 2;
+        icon_top = (free_top + free_bottom - icon->height) / 2;
+    }
 
     rgb_t led_color = corner->led == LEDS_GREEN ? LED_G : corner->led == LEDS_RED ? LED_R : LED_LOC;
     bool led_on = corner->led == LEDS_GREEN || corner->led == LEDS_RED;
@@ -170,7 +246,7 @@ static void draw_corner(int slot, const ui_slot_t *corner)
 
     for (int y = 0; y < CORN_H; y++) {
         int screen_y = origin_y + y;
-        uint16_t *row = s_framebuffer + screen_y * UI_W + origin_x;
+        uint16_t *row = row_pixels(screen_y) + origin_x;
         rgb_t background = BG(screen_y);
         float local_y = MY(y) + 0.5f;
         for (int x = 0; x < CORN_W; x++) {
@@ -187,6 +263,14 @@ static void draw_corner(int slot, const ui_slot_t *corner)
             // divider between the left and right quadrants, fading out toward the screen edge
             if (MX(x) == CORN_W - 1) {
                 color = mix(color, TXT_DIM, 10 + 30 * (CORN_H - MY(y)) / CORN_H);
+            }
+            // icon (alpha-blended)
+            int icon_x = x - icon_left, icon_y = y - icon_top;
+            if (icon && icon_x >= 0 && icon_y >= 0 && icon_x < icon->width && icon_y < icon->height) {
+                int icon_index = icon_y * icon->width + icon_x;
+                uint8_t icon_alpha = icon->alphas[icon_index];
+                rgb_t icon_color = unpack_rgb565(icon->colors[icon_index]);
+                color = icon_alpha == 255 ? icon_color : mix(color, icon_color, icon_alpha);
             }
             // L bracket, 3 px, round caps
             float bracket_distance = fminf(seg_dist(local_x, local_y, inset, inset, inset + arm, inset),
@@ -224,36 +308,26 @@ static void draw_corner(int slot, const ui_slot_t *corner)
 #undef MY
 }
 
-static void draw_oled(const ui_view_t *view)
+// OLED bezel: rounded frame around the dot area (the dots: ui_compose_oled_row). Static.
+static void draw_bezel(void)
 {
     for (int y = BEZEL_Y - 2; y < BEZEL_Y + BEZEL_H + 1; y++) {
-        uint16_t *row = s_framebuffer + y * UI_W;
         rgb_t background = BG(y);
         int bezel_offset_y = y - BEZEL_Y;
-        int oled_offset_y = y - OLED_PY, oled_row = oled_offset_y / OLED_S, subpixel_y = oled_offset_y % OLED_S;
         for (int x = BEZEL_X - 2; x < BEZEL_X + BEZEL_W + 2; x++) {
+            uint16_t *pixel = pixel_at(x, y);
+            if (!pixel) { // dot area
+                continue;
+            }
             int bezel_offset_x = x - BEZEL_X;
             int coverage = rrect_cov((float)bezel_offset_x, (float)bezel_offset_y, BEZEL_W, BEZEL_H, 10.0f);
             rgb_t color = background;
             if (coverage) {
                 int inner_coverage = rrect_cov(bezel_offset_x - 1.0f, bezel_offset_y - 1.0f, BEZEL_W - 2.0f,
                                                BEZEL_H - 2.0f, 9.0f);
-                rgb_t fill = mix(BEZEL_EDGE, BEZEL, inner_coverage);
-                int oled_offset_x = x - OLED_PX;
-                if (oled_offset_y >= 0 && oled_offset_y < OLED_H * OLED_S && oled_offset_x >= 0 &&
-                    oled_offset_x < OLED_W * OLED_S) {
-                    int oled_column = oled_offset_x / OLED_S, subpixel_x = oled_offset_x % OLED_S;
-                    bool lit = (view->oled[oled_row * (OLED_W / 8) + oled_column / 8] & (0x80 >> (oled_column & 7)));
-                    bool core = subpixel_x < 2 && subpixel_y < 2;
-                    if (lit) {
-                        fill = core ? PIX_ON : mix(BEZEL, PIX_HALO, 110);
-                    } else if (core) {
-                        fill = PIX_OFF;
-                    }
-                }
-                color = mix(background, fill, coverage);
+                color = mix(background, mix(BEZEL_EDGE, BEZEL, inner_coverage), coverage);
             }
-            row[x] = pack_d(color, x, y);
+            *pixel = pack_d(color, x, y);
         }
     }
 }
@@ -264,7 +338,7 @@ static void draw_dots(const ui_view_t *view)
     int total_width = (view->pages - 1) * (dot_size + gap) + pill_width;
     int start_x = (UI_W - total_width) / 2, center_y = DOTS_Y + DOTS_H / 2;
     for (int y = DOTS_Y; y < DOTS_Y + DOTS_H; y++) {
-        uint16_t *row = s_framebuffer + y * UI_W;
+        uint16_t *row = row_pixels(y);
         for (int x = start_x - 4; x < start_x + total_width + 4; x++) {
             rgb_t color = BG(y);
             int dot_x = start_x;
@@ -305,7 +379,7 @@ static void draw_status(const ui_view_t *view)
     rgb_t dot_color = view->link == 2 ? LED_G : view->link == 1 ? AMBER : OFF;
     float dot_center_y = STAT_H / 2.0f + 0.5f;
     for (int y = 0; y < STAT_H; y++) {
-        uint16_t *row = s_framebuffer + (STAT_Y + y) * UI_W + 10;
+        uint16_t *row = row_pixels(STAT_Y + y) + 10;
         rgb_t background = BG(STAT_Y + y);
         for (int x = 0; x < UI_W - 20; x++) {
             rgb_t color = background;
@@ -441,7 +515,49 @@ static inline uint16_t pack_d(rgb_t color, int x, int y)
     return (uint16_t)(((red & 0xf8) << 8) | ((green & 0xfc) << 3) | (blue >> 3));
 }
 
+static inline rgb_t unpack_rgb565(uint16_t color)
+{
+    int red = color >> 11, green = (color >> 5) & 0x3f, blue = color & 0x1f;
+    return (rgb_t){red << 3 | red >> 2, green << 2 | green >> 4, blue << 3 | blue >> 2};
+}
+
 static inline int clamp255(float value)
 {
     return value <= 0 ? 0 : value >= 255 ? 255 : (int)value;
+}
+
+// ---------------------------------------------------------------------------------------------
+// Framebuffer layout
+// ---------------------------------------------------------------------------------------------
+// Stored row y, NULL through the OLED dot area (only its sides are stored: oled_row_sides).
+static uint16_t *row_pixels(int y)
+{
+    if (y < UI_OLED_Y) {
+        return s_framebuffer + y * UI_W;
+    }
+    if (y < OLED_ROWS_END) {
+        return NULL;
+    }
+    return s_framebuffer + UI_OLED_Y * UI_W + UI_OLED_H * SIDES_W + (y - OLED_ROWS_END) * UI_W;
+}
+
+// Stored pixel (x, y), NULL inside the OLED dot area.
+static uint16_t *pixel_at(int x, int y)
+{
+    if (y < UI_OLED_Y || y >= OLED_ROWS_END) {
+        return row_pixels(y) + x;
+    }
+    if (x < UI_OLED_X) {
+        return oled_row_sides(y) + x;
+    }
+    if (x >= UI_OLED_X + UI_OLED_W) {
+        return oled_row_sides(y) + x - UI_OLED_W;
+    }
+    return NULL;
+}
+
+// Stored pixels of row y through the OLED dot area: UI_OLED_X left of it, then the right side.
+static inline uint16_t *oled_row_sides(int y)
+{
+    return s_framebuffer + UI_OLED_Y * UI_W + (y - UI_OLED_Y) * SIDES_W;
 }

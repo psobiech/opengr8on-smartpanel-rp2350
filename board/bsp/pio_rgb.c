@@ -26,10 +26,26 @@ static uint rgb_offset;
 static pio_rgb_info_t *g_pio_rgb_info;
 static uint16_t *buffer;
 
+// opengr8on: line table mode (pio_rgb_info_t.line_table): the control channel writes the next row's
+// address to the pixel channel's READ_ADDR trigger after every row; NULL ends the frame (IRQ).
+static uint line_control_dma_chan;
+static const uint16_t *const *volatile line_table_started; // the table the current frame runs from
+
 uint16_t test_count = 0;
 void __no_inline_not_in_flash_func(dma_complete_handler)(void)
 {
     test_count = (test_count + 1) % g_pio_rgb_info->transfer_index_max;
+    // opengr8on: line table mode: start the next frame from the first row address
+    if (g_pio_rgb_info->line_table)
+    {
+        line_table_started = g_pio_rgb_info->line_table;
+        dma_channel_set_read_addr(line_control_dma_chan, line_table_started, true);
+        if (g_pio_rgb_info->dma_flush_done_cb)
+        {
+            g_pio_rgb_info->dma_flush_done_cb();
+        }
+        return;
+    }
     // 中文：双缓存模式
     // English: Double buffer mode
     if (g_pio_rgb_info->mode.double_buffer)
@@ -354,6 +370,26 @@ void pio_rgb_dma_init(pio_rgb_info_t *info)
     channel_config_set_dreq(&c0, pio_get_dreq(RGB_COLOR_DATA_PIO, rgb_sm, true)); // set for pio2 sm 0
     // channel_config_set_chain_to(&c0, rgb_chan_1);
 
+    // opengr8on: line table mode: one row per pixel-channel run, chained to the control channel
+    // that loads the next row address; IRQ only on the NULL that ends the table (IRQ_QUIET).
+    if (info->line_table)
+    {
+        dma_channel_claim(rgb_dma_chan); // channel 0, otherwise never claimed
+        line_control_dma_chan = dma_claim_unused_channel(true);
+        channel_config_set_chain_to(&c0, line_control_dma_chan);
+        channel_config_set_irq_quiet(&c0, true);
+        dma_channel_configure(rgb_dma_chan, &c0, &RGB_COLOR_DATA_PIO->txf[rgb_sm], NULL, info->width, false);
+
+        dma_channel_config control = dma_channel_get_default_config(line_control_dma_chan);
+        channel_config_set_transfer_data_size(&control, DMA_SIZE_32);
+        channel_config_set_read_increment(&control, true);
+        channel_config_set_write_increment(&control, false);
+        dma_channel_configure(line_control_dma_chan, &control, &dma_hw->ch[rgb_dma_chan].al3_read_addr_trig,
+                              info->line_table, 1, false);
+        bsp_dma_channel_irq_add(1, rgb_dma_chan, dma_complete_handler);
+        return;
+    }
+
     uint transfer_count = (info->mode.enabled_transfer) ? info->transfer_size : (info->width * info->height);
 
     dma_channel_configure(
@@ -434,6 +470,14 @@ void pio_rgb_set_scanout_enabled(bool enabled)
         pio_set_sm_mask_enabled(RGB_SYNC_PIO, sync_mask, false);
         pio_set_sm_mask_enabled(RGB_COLOR_DATA_PIO, color_data_mask, false);
         dma_irqn_set_channel_enabled(1, rgb_dma_chan, false);
+        if (g_pio_rgb_info->line_table)
+        {
+            // RP2350-E5: an aborted channel or one chained to it can re-trigger (the abort then never
+            // finishes) unless both are disabled first; re-enabled by the restart below
+            hw_clear_bits(&dma_hw->ch[line_control_dma_chan].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+            hw_clear_bits(&dma_hw->ch[rgb_dma_chan].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+            dma_channel_abort(line_control_dma_chan);
+        }
         dma_channel_abort(rgb_dma_chan);
         dma_irqn_acknowledge_channel(1, rgb_dma_chan);
         return;
@@ -467,6 +511,11 @@ void pio_rgb_set_scanout_enabled(bool enabled)
         pio_sm_put_blocking(machines[i].pio, machines[i].sm, machines[i].count);
     }
     g_pio_rgb_info->transfer_index = 0;
+    if (g_pio_rgb_info->line_table)
+    {
+        hw_set_bits(&dma_hw->ch[rgb_dma_chan].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+        hw_set_bits(&dma_hw->ch[line_control_dma_chan].al1_ctrl, DMA_CH0_CTRL_TRIG_EN_BITS);
+    }
     dma_irqn_acknowledge_channel(1, rgb_dma_chan);
     dma_irqn_set_channel_enabled(1, rgb_dma_chan, true);
 
@@ -474,4 +523,18 @@ void pio_rgb_set_scanout_enabled(bool enabled)
     pio_enable_sm_mask_in_sync(RGB_SYNC_PIO, sync_mask);
 
     dma_complete_handler();
+}
+
+void pio_rgb_set_line_table(const uint16_t *const *line_table)
+{
+    g_pio_rgb_info->line_table = line_table;
+}
+
+int __not_in_flash_func(pio_rgb_lines_started)(void)
+{
+    const uint16_t *const *table = line_table_started;
+    intptr_t started = (intptr_t)(dma_hw->ch[line_control_dma_chan].read_addr - (uintptr_t)table) /
+                       (intptr_t)sizeof(table[0]);
+    // just after a frame start the control channel can still point into the previous table
+    return started < 0 ? 0 : started > g_pio_rgb_info->height ? g_pio_rgb_info->height : (int)started;
 }

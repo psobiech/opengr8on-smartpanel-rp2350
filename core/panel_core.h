@@ -88,7 +88,8 @@ typedef struct {
     uint8_t button_mode[PANEL_BUTTONS]; // BUTTON_MODE_*
     uint16_t button_values;       // PANEL_BUTTON Value, bit per button
     char label[PANEL_BUTTONS][17];
-    char icon_a[PANEL_BUTTONS][17];
+    char icon_a[PANEL_BUTTONS][17]; // IconA: shown while Value is 0 (and always in monostable mode)
+    char icon_b[PANEL_BUTTONS][17]; // IconB: shown while a bistable button's Value is 1
     // LEDs
     led_state_t led[PANEL_BUTTONS];
     uint64_t led_flash_until_us[PANEL_BUTTONS];
@@ -149,6 +150,9 @@ void panel_set_temp(panel_t *panel, float celsius);
 
 // Button index shown on a slot of the current page.
 int panel_slot_button(const panel_t *panel, int slot);
+// Icon file name for a slot right now: IconB while the button is bistable and its Value is 1 (if
+// set), IconA otherwise. "" = none; a leading '~' asks for the negative.
+const char *panel_slot_icon(const panel_t *panel, int slot);
 // Effective LED color for a slot right now (flash phases resolved).
 led_state_t panel_slot_led(const panel_t *panel, int slot, uint64_t now_us);
 bool panel_oled_pixel(const panel_t *panel, int x, int y);

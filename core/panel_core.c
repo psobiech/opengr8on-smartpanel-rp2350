@@ -559,7 +559,8 @@ static void tfbus_cmd(panel_t *panel, const uint8_t *data, uint64_t now_us)
 }
 
 // DISPLAY_BLOCK (0x30): chan sub data[20]. Button config: chan = button, sub 0x00 / 0x01 / 0x0a
-// (meaning per sub guessed: IconA / IconB / Label). chan 0 sub 2..5 = PANEL gesture icons.
+// (IconA / IconB guessed from the init order, Label confirmed). chan 0 sub 2..5 = PANEL gesture
+// icons. The button icons are drawn by the board on the button (panel_slot_icon), not on the OLED.
 static void display_block(panel_t *panel, const uint8_t *block)
 {
     uint8_t channel = block[0], sub = block[1];
@@ -571,17 +572,14 @@ static void display_block(panel_t *panel, const uint8_t *block)
         copy_str(panel->gesture_icon[k_gesture_by_sub[sub - 2]], 17, block_data, 16);
         return;
     }
-    if (channel < PANEL_BUTTONS && (sub == 0x00 || sub == 0x0a)) {
-        // Label (SetLabel, sub 0x0a) is shown only at the button's corner (UI), not on the OLED.
-        char *dst = sub == 0x0a ? panel->label[channel] : panel->icon_a[channel];
+    if (channel < PANEL_BUTTONS && (sub == 0x00 || sub == 0x01 || sub == 0x0a)) {
+        char *dst = sub == 0x0a ? panel->label[channel] : sub == 0x00 ? panel->icon_a[channel] : panel->icon_b[channel];
         char previous[17];
         memcpy(previous, dst, sizeof previous);
         copy_str(dst, 17, block_data, 16);
         if (strcmp(previous, dst) != 0) {
             panel->version++;
-            if (sub == 0x00 && panel->oled_mode == OLED_BUTTONS) {
-                render_buttons(panel);
-            }
+            logf_(panel, "button %d %s \"%s\"", channel, sub == 0x0a ? "Label" : sub == 0x00 ? "IconA" : "IconB", dst);
         }
     }
 }
@@ -758,6 +756,16 @@ int panel_slot_button(const panel_t *panel, int slot)
     return (panel->page - 1) * PANEL_SLOTS + slot;
 }
 
+const char *panel_slot_icon(const panel_t *panel, int slot)
+{
+    int button = panel_slot_button(panel, slot);
+    bool on = (panel->button_values >> button) & 1;
+    if (panel->button_mode[button] == BUTTON_MODE_BISTABLE && on && panel->icon_b[button][0]) {
+        return panel->icon_b[button];
+    }
+    return panel->icon_a[button];
+}
+
 led_state_t panel_slot_led(const panel_t *panel, int slot, uint64_t now_us)
 {
     int button = panel_slot_button(panel, slot);
@@ -801,22 +809,11 @@ static void request_beep(panel_t *panel, uint16_t frequency_hz, uint16_t duratio
 // ---------------------------------------------------------------------------------------------
 // OLED drawing (1 bpp, row-major, MSB = leftmost pixel)
 // ---------------------------------------------------------------------------------------------
-// "Buttons" display mode: configured label / icon name of the current page's buttons.
-// Unconfigured buttons draw nothing, so the screen stays clear by default.
+// "Buttons" display mode: the OLED stays blank. Labels and icons (IconA / IconB) are shown on the
+// buttons themselves by the board (panel_slot_icon).
 static void render_buttons(panel_t *panel)
 {
     memset(panel->oled_shown, 0, sizeof panel->oled_shown);
-    for (int slot = 0; slot < PANEL_SLOTS; slot++) {
-        int button = panel_slot_button(panel, slot);
-        char text[17];
-        snprintf(text, sizeof text, "%s", panel->icon_a[button]); // labels go to the corners, not the OLED
-        if (!text[0]) {
-            continue;
-        }
-        text[10] = 0; // 10 chars fit a 64-px cell
-        int center_x = (slot & 1) ? 96 : 32, top_y = (slot & 2) ? 44 : 12;
-        panel_oled_text(panel->oled_shown, center_x - oled_text_width(text, 1) / 2, top_y, 1, text);
-    }
     panel->oled_mode = OLED_BUTTONS;
     panel->version++;
 }
