@@ -12,7 +12,9 @@ COVERAGE ?= 0
 COV := $(if $(filter 1,$(COVERAGE)),--coverage)
 # Coverage builds run unoptimised: -O1 merges lines and turns switches into tables gcov cannot attribute.
 OPT := $(if $(COV),-O0,-O1)
-CFLAGS := -std=gnu11 -Wall -Wextra -Werror $(OPT) -g -fsanitize=address,undefined $(COV)
+# AddressSanitizer (with LeakSanitizer: a leak fails the test at exit) and UBSan; any sanitizer
+# report aborts the test instead of printing and passing.
+CFLAGS := -std=gnu11 -Wall -Wextra -Werror $(OPT) -g -fsanitize=address,undefined -fno-sanitize-recover=all $(COV)
 # Firmware sources (src/) compile against the Pico SDK / FatFS stand-ins in stubs/ (declarations
 # only: each test defines the fakes it needs).
 FW_INC := -Istubs -I$(BSP) -I$(CORE) -I$(SRC)

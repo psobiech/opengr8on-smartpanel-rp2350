@@ -197,6 +197,7 @@ static void test_core1_frame(void)
     scanout_set_oled(oled); // core0 changes the OLED while the frame is sent
     check("core1: a later OLED change does not touch the frame being sent", s_oled_frame[0] == 0xff);
     g_frames_started_in_wfe = 1;
+    g_wfe_calls = 0;
     g_lines_started = 0;
     core1_frame(next_frame);
     check("core1: the next frame shows it", s_oled_frame[0] == 0x00);
@@ -387,6 +388,10 @@ void __sev(void)
 // core1 waits here for a frame start; the fake DMA starts one at the g_frames_started_in_wfe-th call.
 void __wfe(void)
 {
+    if (g_wfe_calls > 1000) { // no frame start is coming: fail instead of spinning
+        printf("FAIL core1 waits for a frame that never starts\n");
+        exit(EXIT_FAILURE);
+    }
     if (++g_wfe_calls == g_frames_started_in_wfe) {
         frame_started();
     }
