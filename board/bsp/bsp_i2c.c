@@ -17,11 +17,6 @@ static bool rd(uint8_t addr, uint8_t *b, size_t n)
     return i2c_read_timeout_us(BSP_I2C_NUM, addr, b, n, false, I2C_TIMEOUT_US(n)) == (int)n;
 }
 
-bool bsp_i2c_write(uint8_t device_addr, uint8_t *buffer, size_t len)
-{
-    return wr(device_addr, buffer, len, false);
-}
-
 bool bsp_i2c_write_reg8(uint8_t device_addr, uint8_t reg_addr, uint8_t *buffer, size_t len)
 {
     uint8_t write_buffer[len + 1];

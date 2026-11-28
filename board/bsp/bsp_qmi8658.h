@@ -495,21 +495,10 @@ enum QMI8658_WakeOnMotionThreshold
     QMI8658WomThreshold_low = 32    /*!< Low threshold - small motion needed to wake. */
 };
 
-unsigned char bsp_qmi8658_write_reg(unsigned char reg, unsigned char value);
-unsigned char bsp_qmi8658_read_reg(unsigned char reg, unsigned char *buf, unsigned short len);
 unsigned char bsp_qmi8658_init(void);
 void bsp_qmi8658_config_apply(struct QMI8658Config const *config);
 void bsp_qmi8658_enableSensors(unsigned char enableFlags);
-void bsp_qmi8658_read_acc_xyz(float acc_xyz[3]);
-void bsp_qmi8658_read_gyro_xyz(float gyro_xyz[3]);
-void bsp_qmi8658_read_data(qmi8658_data_t *data);
-void bsp_qmi8658_read_data_raw(qmi8658_data_t *data);
-void bsp_qmi8658_read_ae(float quat[4], float velocity[3]);
-unsigned char bsp_qmi8658_readStatus0(void);
-unsigned char bsp_qmi8658_readStatus1(void);
 float bsp_qmi8658_readTemp(void);
-void bsp_qmi8658_enableWakeOnMotion(void);
-void bsp_qmi8658_disableWakeOnMotion(void);
 // opengr8on: tap detection (bsp_qmi8658.c)
 bool bsp_qmi8658_enable_tap(float peak_threshold_g2, float quiet_threshold_g2);
 bool bsp_qmi8658_tap_detected(void);

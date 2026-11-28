@@ -239,7 +239,6 @@ int main(void)
     static pio_rgb_info_t rgb_info;
     rgb_info.width = LCD_W;
     rgb_info.height = LCD_H;
-    rgb_info.transfer_size = LCD_W * 80;
     rgb_info.pclk_freq = BSP_LCD_PCLK_FREQ;
     scanout_init(&rgb_info);
     bsp_display_info_t display_info = {.width = LCD_W, .height = LCD_H, .brightness = PANEL_DISPLAY_BRIGHTNESS,

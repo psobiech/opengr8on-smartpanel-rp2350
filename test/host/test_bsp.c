@@ -43,6 +43,7 @@ static uint64_t g_now_us;
 static uint32_t g_slept_ms;
 static char g_gpio_log[512];
 static gpio_irq_callback_t g_gpio_callback;
+static bsp_touch_interface_t *g_touch; // as bsp_touch_new_gt911 returned it
 static uint g_gpio_callback_pin;
 static bool g_gt911_answers_after_sleep; // the product ID appears after the first sleep_ms(1000)
 static int g_fake_i2c_storage;
@@ -87,11 +88,10 @@ static void test_i2c(void)
     check("I2C read: succeeds on a present device", bsp_i2c_read_reg16(GT911_DEVICE_ADDR, 0x8047, buffer, sizeof buffer));
     check("I2C read: timeout grows with the length", g_last_timeout_us == 2000u + 100u * sizeof buffer);
     check("I2C: an absent device fails instead of hanging", !bsp_i2c_read_reg8(0x10, 0x00, buffer, 1) &&
-                                                                !bsp_i2c_write_reg8(0x10, 0x00, buffer, 1) &&
-                                                                !bsp_i2c_write(0x10, buffer, 1));
-    buffer[0] = 0x00, buffer[1] = 0x42;
-    check("I2C raw write: register byte first", bsp_i2c_write(QMI8658_SLAVE_ADDR_L, buffer, 2) &&
-                                                    g_imu.registers[0x00] == 0x42);
+                                                                !bsp_i2c_write_reg8(0x10, 0x00, buffer, 1));
+    buffer[0] = 0x42;
+    check("I2C register write: register byte first", bsp_i2c_write_reg8(QMI8658_SLAVE_ADDR_L, 0x00, buffer, 1) &&
+                                                         g_imu.registers[0x00] == 0x42);
 }
 
 static void test_gt911_init(void)
@@ -99,8 +99,9 @@ static void test_gt911_init(void)
     bsp_touch_interface_t *touch;
     bsp_touch_info_t info = {.width = 480, .height = 480};
     check("GT911: no info, no interface", !bsp_touch_new_gt911(&touch, NULL));
-    check("GT911: interface", bsp_touch_new_gt911(&touch, &info) && touch == bsp_gt911_get_touch_interface() &&
-                                  touch->read == bsp_gt911_read && touch->init == bsp_gt911_init);
+    check("GT911: interface", bsp_touch_new_gt911(&touch, &info) && touch->read == bsp_gt911_read &&
+                                  touch->init == bsp_gt911_init);
+    g_touch = touch;
     memcpy(g_gt911.registers + GT911_REG_PRODUCT_ID, "000", 4);
     g_gt911_answers_after_sleep = true;
     g_gpio_log[0] = 0;
@@ -159,7 +160,7 @@ static void test_gt911_touch_levels(void)
 
 static void test_gt911_reports(void)
 {
-    bsp_touch_interface_t *touch = bsp_gt911_get_touch_interface();
+    bsp_touch_interface_t *touch = g_touch;
     bsp_touch_data_t data;
     g_gt911.registers[GT911_EREG_READ_XY] = 0x82;
     g_gpio_callback(BSP_GT911_INT_PIN, GPIO_IRQ_EDGE_RISE);
@@ -345,7 +346,7 @@ static void gt911_report(uint8_t status, int point_count, ...)
     }
     va_end(points);
     g_gpio_callback(BSP_GT911_INT_PIN, GPIO_IRQ_EDGE_FALL);
-    bsp_gt911_get_touch_interface()->read();
+    g_touch->read();
 }
 
 // GT911 config block with a recognisable pattern (byte 0 = config version 0x41) and the levels.

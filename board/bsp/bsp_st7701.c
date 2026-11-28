@@ -213,38 +213,11 @@ static void bsp_st7701_init(void)
     pio_rgb_pin_t pin;
     pio_rgb_info_t *rgb_info = (pio_rgb_info_t *)g_display_info->user_data;
 
-    // printf("pio_rgb_init framebuffer1:0x%x\r\n", rgb_info->framebuffer1);
-    // printf("pio_rgb_init framebuffer2:0x%x\r\n", rgb_info->framebuffer2);
-
-    // opengr8on: line table mode has no full framebuffer (its rows are the caller's)
-    if (rgb_info->framebuffer1 == NULL && rgb_info->line_table == NULL)
+    // opengr8on: line table scan-out only (the rows are the caller's, src/scanout.c)
+    if (rgb_info->line_table == NULL)
     {
-        printf("Error: Framebuffer1 is NULL\r\n");
+        printf("Error: no line table\r\n");
         return;
-    }
-    for (size_t i = 0; rgb_info->framebuffer1 && i < rgb_info->width * rgb_info->height; i++)
-    {
-        rgb_info->framebuffer1[i] = 0xffff;
-    }
-
-    // double buffer mode
-    if (rgb_info->mode.double_buffer)
-    {
-        if (rgb_info->framebuffer2 == NULL)
-        {
-            printf("Error: Framebuffer2 is NULL\r\n");
-            return;
-        }
-    }
-
-    // psram mode
-    if (rgb_info->mode.enabled_psram)
-    {
-        if (rgb_info->transfer_buffer1 == NULL && rgb_info->transfer_buffer2 == NULL)
-        {
-            printf("Error: Transfer buffer1 or buffer2 is NULL\r\n");
-            return;
-        }
     }
 
     // rgb_info->pclk_freq = BSP_LCD_PCLK_FREQ;
@@ -255,18 +228,6 @@ static void bsp_st7701_init(void)
     pin.vsync_pin = BSP_LCD_VSYNC_PIN;
 
     pio_rgb_init(rgb_info, &pin);
-}
-
-void bsp_st7701_flush_dma(bsp_display_area_t *area, uint16_t *color_p)
-{
-    if (area == NULL && color_p == NULL)
-    {
-        pio_rgb_change_framebuffer();
-    }
-    else
-    {
-        pio_rgb_update_framebuffer(area->x1, area->y1, area->x2, area->y2, color_p);
-    }
 }
 
 bool bsp_display_new_st7701(bsp_display_interface_t **interface, bsp_display_info_t *info)
@@ -284,7 +245,6 @@ bool bsp_display_new_st7701(bsp_display_interface_t **interface, bsp_display_inf
     display_if.init = bsp_st7701_init;
     display_if.reset = bsp_st7701_reset;
     display_if.set_brightness = bsp_lcd_set_brightness;
-    display_if.flush_dma = bsp_st7701_flush_dma;
 
     *interface = &display_if;
     g_display_if = &display_if;

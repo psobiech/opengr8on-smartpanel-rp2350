@@ -284,8 +284,7 @@ make -C test/host preview                  # podgląd UI -> test/host/preview_*.
 ```
 
 `make coverage` zapisuje też `test/host/out/coverage/summary.md` (tabela Markdown) i `coverage.json`;
-wymaga tylko `gcc`/`gcov` i `python3`. CI wymaga co najmniej 90% pokrycia linii (w `bsp_qmi8658.c` liczą się
-też nieużywane funkcje producenta).
+wymaga tylko `gcc`/`gcov` i `python3`. CI wymaga co najmniej 95% pokrycia linii.
 
 Kod z `src/` (`main.c`, `icons.c`, `scanout.c`) i `board/bsp/` test dołącza przez `#include`, z zaślepkami Pico SDK i
 FatFS z `test/host/stubs/` (same deklaracje; atrapy sprzętu definiuje każdy test).
@@ -309,6 +308,9 @@ Test sprawdza na hoście:
 - sterowniki płytki (`test_bsp`, emulowana magistrala I2C): zapis progów dotyku GT911 (tylko dwa bajty,
   suma kontrolna, Config_Fresh, tylko przy zmianie), raporty dotyku i obroty, QMI8658: wyszukiwanie,
   temperatura, konfiguracja wykrywania stuknięć (CTRL9, timeout), błędy transmisji,
+- sterowniki ekranu (`test_display`): przerwania DMA, inicjalizacja ST7701 po 9-bitowym SPI, podświetlenie,
+  skanowanie z tablicy linii (kanał pikseli + kanał sterujący), kolejność zatrzymania / wznowienia
+  zgodna z erratą RP2350-E5,
 - że każda wysłana ramka przechodzi przez parser ramek ESP32 CLU.
 
 Odtworzenie zrzutu podaje ~44 tys. prawdziwych ramek z magistrali (wszystkie moduły) i sprawdza, że

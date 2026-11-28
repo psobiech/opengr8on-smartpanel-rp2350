@@ -19,7 +19,7 @@ FW_INC := -Istubs -I$(BSP) -I$(CORE) -I$(SRC)
 STUBS := $(wildcard stubs/*.h stubs/*/*.h)
 HDRS := $(wildcard $(CORE)/*.h $(SRC)/*.h $(BSP)/*.h)
 
-TESTS := $(addprefix $(OUT)/,test_panel test_png test_main test_icons test_scanout test_bsp)
+TESTS := $(addprefix $(OUT)/,test_panel test_png test_main test_icons test_scanout test_bsp test_display)
 
 $(OUT)/test_panel: test_panel.c $(CORE)/panel_core.c $(PROTO)/tfbus_frame.c $(HDRS)
 	$(CC) $(CFLAGS) -I$(CORE) -I$(PROTO)/include -o $@ $(filter %.c,$^)
@@ -39,9 +39,12 @@ $(OUT)/test_scanout: test_scanout.c $(SRC)/scanout.c $(SRC)/ui.c $(STUBS) $(HDRS
 	$(CC) $(CFLAGS) $(FW_INC) -o $@ test_scanout.c $(SRC)/ui.c -lm
 
 # Board drivers (included). Vendor code: its own warnings are not ours to fail on.
-BSP_VENDOR_FLAGS := -Wno-unused-parameter -Wno-incompatible-pointer-types
+BSP_VENDOR_FLAGS := -Wno-unused-parameter -Wno-incompatible-pointer-types -Wno-sign-compare
 $(OUT)/test_bsp: test_bsp.c $(BSP)/bsp_i2c.c $(BSP)/bsp_gt911.c $(BSP)/bsp_qmi8658.c $(STUBS) $(HDRS)
 	$(CC) $(CFLAGS) $(BSP_VENDOR_FLAGS) -Istubs -I$(BSP) -o $@ test_bsp.c -lm
+
+$(OUT)/test_display: test_display.c $(BSP)/bsp_dma_channel_irq.c $(BSP)/pio_rgb.c $(BSP)/bsp_st7701.c $(STUBS) $(HDRS)
+	$(CC) $(CFLAGS) $(BSP_VENDOR_FLAGS) -Istubs -I$(BSP) -o $@ test_display.c -lm
 
 # The tests read fixtures/ relative to this directory (make -C test/host).
 .PHONY: test clean coverage
@@ -53,6 +56,7 @@ test: $(TESTS)
 	$(OUT)/test_icons
 	$(OUT)/test_scanout
 	$(OUT)/test_bsp
+	$(OUT)/test_display
 
 clean:
 	rm -rf $(OUT) && mkdir -p $(OUT) # recreated: `make clean test` reuses the parse-time mkdir

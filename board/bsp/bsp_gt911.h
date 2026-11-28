@@ -22,7 +22,6 @@ typedef enum
 } gt911_reg_t;
 
 bool bsp_touch_new_gt911(bsp_touch_interface_t **interface, bsp_touch_info_t *info);
-bsp_touch_interface_t *bsp_gt911_get_touch_interface(void);
 uint64_t bsp_gt911_last_report_us(void); // time of the last GT911 report (touch or release)
 
 // opengr8on: set Screen_Touch_Level / Screen_Leave_Level (touch sensitivity, lower = more sensitive;

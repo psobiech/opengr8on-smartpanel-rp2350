@@ -3,16 +3,9 @@
 #include "pico/time.h"
 
 static bsp_touch_info_t *g_touch_info;
-static bsp_touch_interface_t *g_touch_if;
 static bool g_gt911_irq_flag = false;
 
 static void bsp_gt911_print_config(void);
-
-
-bsp_touch_interface_t *bsp_gt911_get_touch_interface(void)
-{
-    return g_touch_if;
-}
 
 
 bool bsp_gt911_reg_read_byte(uint16_t reg_addr, uint8_t *data, size_t len)
@@ -258,7 +251,6 @@ bool bsp_touch_new_gt911(bsp_touch_interface_t **interface, bsp_touch_info_t *in
     touch_if.get_rotation = bsp_gt911_get_rotation;
     touch_if.set_rotation = bsp_gt911_set_rotation;
 
-    g_touch_if = &touch_if;
     *interface = &touch_if;
     g_touch_info = &touch_info;
     return true;

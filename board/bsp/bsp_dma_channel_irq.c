@@ -36,6 +36,12 @@ void bsp_dma_channel_irq_add(uint8_t irq_num, uint dma_channel, channel_irq_call
 
     if (1 == irq_num)
     {
+        // opengr8on: the callback table is fixed (13 channels); a further add overflowed it
+        if (g_irq1_info.len >= sizeof g_irq1_info.callback / sizeof g_irq1_info.callback[0])
+        {
+            printf("DMA IRQ 1: callback table full!\r\n");
+            return;
+        }
         dma_channel_set_irq1_enabled(dma_channel, true);
         g_irq1_info.dma_channel[g_irq1_info.len] = dma_channel;
         g_irq1_info.callback[g_irq1_info.len] = callback;

@@ -11,6 +11,7 @@ typedef unsigned int uint;
 
 #define __not_in_flash(group)
 #define __not_in_flash_func(function_name) function_name
+#define __no_inline_not_in_flash_func(function_name) function_name
 
 // pico/time.h
 typedef int32_t alarm_id_t;
