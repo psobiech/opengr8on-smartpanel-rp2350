@@ -172,7 +172,6 @@ wygenerowania potrzeba Pillow i Noto Sans: `python3 tools/gen_font.py > src/font
 | Opcja | Domyślnie | Jak ustawić |
 |---|---|---|
 | Numer seryjny | `0x0f05fxxx` z unikalnego ID pamięci flash | `cmake -B build -DPANEL_SN=0x0f05xxxx` |
-| Korekta temperatury | `-13` °C | `cmake -B build -DCMAKE_C_FLAGS="-DPANEL_TEMP_OFFSET=-8.0f"` |
 | Jasność podświetlenia | `70` % | `cmake -B build -DPANEL_DISPLAY_BRIGHTNESS=50` (do 100) |
 | Jasność przyciemnionego ekranu | `5` % | `cmake -B build -DPANEL_DISPLAY_DIM_BRIGHTNESS=10` (0..jasność podświetlenia) |
 | Uśpiony ekran | wygaszany po 10 s przyciemnienia | `cmake -B build -DPANEL_DISPLAY_BLANK=OFF` (tylko przyciemniony) |
@@ -271,6 +270,11 @@ są wypisywane przy starcie na USB i na ekranie.
   zapisuje do OM.LUA.
 
 ## Testy
+
+> **Pokrycie testami:** Ponad 490 sprawdzeń, pokryte 98,8% linii (83,3% gałęzi) kodu C
+> kompilowanego w testach hosta (`src/`, `board/bsp/`).
+> Testy hosta zastępują Pico SDK zaślepkami: nie sprawdzają PIO, DMA, RS485 ani zegarów na
+> prawdziwym sprzęcie.
 
 Wymagania: `gcc` lub `clang` z AddressSanitizer/UBSan, `make`; do podglądu dodatkowo Python 3 z
 Pillow. Submoduł `external/clu-esp32` musi być pobrany. Pliki PNG do testów (`test/host/fixtures`)
