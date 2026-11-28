@@ -2,6 +2,7 @@
 
 #include <math.h>
 #include <stdio.h>
+#include <stdlib.h>
 #include <string.h>
 
 #include "font_aa.h"
@@ -16,7 +17,8 @@
 // ---------------------------------------------------------------------------------------------
 // Geometry
 // ---------------------------------------------------------------------------------------------
-// The screen is split into four touch quadrants (slots 0..3) covering everything, the OLED included.
+// The screen is split into four touch quadrants (slots 0..3) covering everything but the middle of
+// the OLED (UI_SWIPE_ONLY_W x UI_SWIPE_ONLY_H, swipes only); the outer half of the OLED belongs to them.
 // Only the outer bands show them: a faint corner bracket, label and LED in each screen corner.
 #define CORN_W   (UI_W / 2)
 #define CORN_H   110                               // top band 0..110, bottom band 370..480
@@ -203,7 +205,10 @@ int ui_hit(int x, int y)
     if (x < 0 || y < 0 || x >= UI_W || y >= UI_H) {
         return -2;
     }
-    return (x >= UI_W / 2) | (y >= UI_H / 2) << 1; // whole quadrant, the OLED area included
+    if (abs(x - UI_W / 2) < UI_SWIPE_ONLY_W / 2 && abs(y - (UI_OLED_Y + UI_OLED_H / 2)) < UI_SWIPE_ONLY_H / 2) {
+        return -1; // middle of the OLED: swipes only
+    }
+    return (x >= UI_W / 2) | (y >= UI_H / 2) << 1; // quadrant, the outer half of the OLED included
 }
 
 // ---------------------------------------------------------------------------------------------

@@ -147,7 +147,8 @@ static uint64_t s_release_us[PANEL_SLOTS];
 
 // ---------------------------------------------------------------------------------------------
 // Touch: up to 5 fingers (GT911), tracked by the controller's track id. The screen is four
-// quadrants (slot 0..3, the OLED area included); each finger keeps the quadrant it started on,
+// quadrants (slot 0..3, the outer half of the OLED included; a finger starting in the middle of the
+// OLED presses nothing, it can only swipe); each finger keeps the quadrant it started on,
 // which is pressed while at least one finger holds it. A press is committed only once the finger
 // has stayed within DRAG_PX of its start for PRESS_DELAY_US (or lifted earlier: a tap), with the
 // touch-down time as its start, so a drag never reaches the CLU. A finger moving DRAG_PX is a drag
@@ -165,7 +166,7 @@ static uint64_t s_release_us[PANEL_SLOTS];
 typedef struct {
     bool used;
     uint8_t track_id;
-    int field;            // ui_hit() at touch-down; -2 once it became a drag
+    int field;            // ui_hit() at touch-down (-1: swipe only); -2 once it became a drag
     bool pressed;         // press committed to the panel
     bool swiped;
     int start_x, start_y; // start position

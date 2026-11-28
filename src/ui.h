@@ -1,6 +1,6 @@
 // Replica UI of the SMART_PANEL_FM_4 on the 480x480 RGB565 framebuffer: the screen is split into
-// four touch quadrants (the OLED area included), marked only by faint corner brackets with label
-// and LED; the 128x64 OLED (3x, dot-matrix look) in the middle, page dots and a status bar.
+// four touch quadrants (the outer half of the OLED included, its middle takes swipes only), marked
+// only by faint corner brackets with label and LED; the 128x64 OLED (3x, dot-matrix look) in the middle, page dots and a status bar.
 // Each region is composed row by row straight into the framebuffer and redrawn only when its
 // content changes, so the single (continuously scanned) framebuffer shows no flicker.
 //
@@ -24,6 +24,9 @@
 #define UI_OLED_H     (OLED_H * UI_OLED_SCALE)  // 192
 #define UI_OLED_X     ((UI_W - UI_OLED_W) / 2)  // 48
 #define UI_OLED_Y     144
+// Touch: the middle of the OLED (half its width and height) takes swipes only, no button presses
+#define UI_SWIPE_ONLY_W (UI_OLED_W / 2) // 192
+#define UI_SWIPE_ONLY_H (UI_OLED_H / 2) // 96
 #define UI_FRAMEBUFFER_PIXELS (UI_W * UI_H - UI_OLED_W * UI_OLED_H)
 
 typedef struct {
@@ -57,5 +60,5 @@ const uint16_t *ui_row(int y);
 // and right of it, the dots from oled (1 bpp, row-major, MSB = leftmost, as panel_t.oled_shown).
 // On the board it runs on core1 from RAM.
 void ui_compose_oled_row(uint16_t *destination, int y, const uint8_t *oled);
-// Touch hit test: quadrant slot 0..3 (anywhere on screen), -2 = outside.
+// Touch hit test: quadrant slot 0..3, -1 = middle of the OLED (swipes only, no button), -2 = outside.
 int ui_hit(int x, int y);
